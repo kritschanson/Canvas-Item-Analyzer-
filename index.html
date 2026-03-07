@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Canvas PLC Item Analyzer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>*, *::before, *::after { box-sizing: border-box; } body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+// ─── CSV Parsing ────────────────────────────────────────────────────────────
+
+function parseCSVFull(text) {
+  // Use a proper state-machine parser that respects quoted newlines
+  const rows = [];
+  let cur = [], cell = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      if (inQ && text[i + 1] === '"') { cell += '"'; i++; }
+      else inQ = !inQ;
+    } else if (ch === ',' && !inQ) {
+      cur.push(cell); cell = "";
+    } else if ((ch === '\n' || ch === '\r') && !inQ) {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      cur.push(cell); cell = "";
+      if (cur.some(c => c.trim())) rows.push(cur);
+      cur = [];
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell || cur.length) { cur.push(cell); if (cur.some(c => c.trim())) rows.push(cur); }
+  return rows;
+}
+
+// Detect file type from headers
+function detectFileType(rows) {
+  if (!rows.length) return null;
+  const h = rows[0];
+  if (h.includes("OverallScore")) return "student";
+  if (h.includes("ItemDifficulty")) return "item";
+  return null;
+}
+
+// Parse Canvas item analysis CSV
+function parseItemCSV(rows, label) {
+  const headers = rows[0];
+  const toObj = row => { const o = {}; headers.forEach((h, i) => o[h] = row[i] ?? ""); return o; };
+  const allRows = rows.slice(1).map(toObj);
+  const summary = allRows[0];
+  const items = allRows.filter(r => r.ItemID && r.ItemID.trim());
+  return { type: "item", label, summary, items };
+}
+
+// Parse Canvas student analysis CSV
+function parseStudentCSV(rows, label) {
+  const headers = rows[0];
+  // Item groups start at col 7, each group is 5 cols wide, last 5 cols are summary
+  const itemGroups = [];
+  let col = 7;
+  while (col < headers.length - 5) {
+    itemGroups.push({ col, itemId: null, question: (headers[col + 2] || "").replace(/\s+/g, " ").trim().slice(0, 80) });
+    col += 5;
+  }
+
+  const students = rows.slice(1).map(row => {
+    if (row.length < headers.length - 2) return null;
+    const items = itemGroups.map(g => {
+      const c = g.col;
+      const earned = parseFloat(row[c + 3]);
+      return {
+        itemId: row[c] || "",
+        answer: (row[c + 2] || "").replace(/<[^>]+>/g, "").trim(),
+        earned: isNaN(earned) ? null : earned,
+        status: row[c + 4] || ""
+      };
+    });
+    const overall = parseFloat(row[row.length - 1]);
+    const possible = parseFloat(row[row.length - 2]);
+    return {
+      name: row[0],
+      section: row[3],
+      correct: parseInt(row[row.length - 5]) || 0,
+      incorrect: parseInt(row[row.length - 4]) || 0,
+      noResponse: parseInt(row[row.length - 3]) || 0,
+      overall: isNaN(overall) ? 0 : overall,
+      possible: isNaN(possible) ? 0 : possible,
+      pct: (!isNaN(overall) && !isNaN(possible) && possible > 0) ? Math.round((overall / possible) * 100) : 0,
+      items
+    };
+  }).filter(Boolean);
+
+  // Build per-item stats from student data
+  const itemStats = itemGroups.map((g, idx) => {
+    const attempted = students.filter(s => s.items[idx]?.status !== "Not Attempted");
+    const correct = students.filter(s => s.items[idx]?.earned > 0);
+    // Tally wrong answers
+    const wrongTally = {};
+    students.forEach(s => {
+      const it = s.items[idx];
+      if (it && it.status !== "Not Attempted" && it.earned === 0 && it.answer) {
+        const ans = it.answer.trim();
+        if (ans) wrongTally[ans] = (wrongTally[ans] || 0) + 1;
+      }
+    });
+    const topWrong = Object.entries(wrongTally).sort((a, b) => b[1] - a[1])[0] || null;
+    return {
+      itemId: students[0]?.items[idx]?.itemId || "",
+      totalStudents: students.length,
+      attempted: attempted.length,
+      correct: correct.length,
+      pct: attempted.length > 0 ? Math.round((correct.length / attempted.length) * 100) : 0,
+      topWrongAnswer: topWrong ? topWrong[0] : null,
+      topWrongCount: topWrong ? topWrong[1] : 0,
+      wrongTally
+    };
+  });
+
+  // Score calculations
+  const scores = students.map(s => s.pct);
+  const mean = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+  const sorted = [...scores].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const high = scores.length ? Math.max(...scores) : 0;
+  const low = scores.length ? Math.min(...scores) : 0;
+
+  // Grade distribution
+  const gradeDist = {
+    A: students.filter(s => s.pct >= 90).length,
+    B: students.filter(s => s.pct >= 80 && s.pct < 90).length,
+    C: students.filter(s => s.pct >= 70 && s.pct < 80).length,
+    D: students.filter(s => s.pct >= 60 && s.pct < 70).length,
+    F: students.filter(s => s.pct < 60).length,
+  };
+
+  // Proficiency: 70%+
+  const proficient = students.filter(s => s.pct >= 70).length;
+  const notProficient = students.filter(s => s.pct < 70).length;
+  const proficiencyPct = students.length > 0 ? Math.round((proficient / students.length) * 100) : 0;
+
+  return { type: "student", label, students, itemStats, mean, median, high, low, gradeDist, proficient, notProficient, proficiencyPct };
+}
+
+// ─── Classifiers ────────────────────────────────────────────────────────────
+
+function classifyDifficulty(d) {
+  const v = parseFloat(d);
+  if (isNaN(v)) return { label: "N/A", color: "#9ca3af" };
+  if (v >= 0.8) return { label: "Easy", color: "#16a34a" };
+  if (v >= 0.5) return { label: "Moderate", color: "#d97706" };
+  return { label: "Difficult", color: "#dc2626" };
+}
+
+function classifyDiscrimination(d) {
+  const v = parseFloat(d);
+  if (isNaN(v)) return { label: "N/A", color: "#9ca3af" };
+  if (v >= 0.4) return { label: "Excellent", color: "#16a34a" };
+  if (v >= 0.2) return { label: "Good", color: "#65a30d" };
+  if (v >= 0.0) return { label: "Fair", color: "#d97706" };
+  return { label: "Poor", color: "#dc2626" };
+}
+
+// ─── AI Prompt ──────────────────────────────────────────────────────────────
+
+function buildPrompt(teachers) {
+  // ── Pre-aggregate everything before sending to AI ──────────────────────────
+
+  // 1. Overall quiz stats (from item analysis summaries)
+  const itemSummaries = teachers.filter(t => t.item).map(t => t.item.summary);
+  const means = itemSummaries.map(s => parseFloat(s.QuizMeanScore)).filter(v => !isNaN(v));
+  const medians = itemSummaries.map(s => parseFloat(s.QuizMedianScore)).filter(v => !isNaN(v));
+  const highs = itemSummaries.map(s => parseFloat(s.QuizHighScore)).filter(v => !isNaN(v));
+  const lows = itemSummaries.map(s => parseFloat(s.QuizLowScore)).filter(v => !isNaN(v));
+  const overallMean = means.length ? (means.reduce((a,b)=>a+b,0)/means.length).toFixed(1) : "N/A";
+  const overallMedian = medians.length ? (medians.reduce((a,b)=>a+b,0)/medians.length).toFixed(1) : "N/A";
+  const overallHigh = highs.length ? Math.max(...highs).toFixed(1) : "N/A";
+  const overallLow = lows.length ? Math.min(...lows).toFixed(1) : "N/A";
+
+  // 2. Aggregate item stats across all item analysis files
+  // itemId -> { correct, total, difficulties[], discriminations[], topDistractor, topDistractorCount }
+  const itemAgg = {};
+  teachers.filter(t => t.item).forEach(t => {
+    t.item.items.forEach(itm => {
+      const id = itm.ItemID;
+      if (!id) return;
+      const correct = parseInt(itm.Correct) || 0;
+      const incorrect = parseInt(itm.Incorrect) || 0;
+      const total = correct + incorrect;
+      const diff = parseFloat(itm.ItemDifficulty);
+      const disc = parseFloat(itm.DiscriminationIndex);
+      if (!itemAgg[id]) itemAgg[id] = { correct:0, total:0, difficulties:[], discriminations:[], topDistractor:"", topDistractorCount:0 };
+      itemAgg[id].correct += correct;
+      itemAgg[id].total += total;
+      if (!isNaN(diff)) itemAgg[id].difficulties.push(diff);
+      if (!isNaN(disc)) itemAgg[id].discriminations.push(disc);
+      // Take distractor from item analysis AnswerFrequencies
+      try {
+        const af = JSON.parse(itm.AnswerFrequencies);
+        (af.blanks || []).forEach(b => {
+          const wrong = (b.answers || []).filter(a => !a.correct && a.count > 0).sort((a,b) => b.count - a.count);
+          if (wrong.length && wrong[0].count > itemAgg[id].topDistractorCount) {
+            itemAgg[id].topDistractor = wrong[0].answer;
+            itemAgg[id].topDistractorCount = wrong[0].count;
+          }
+        });
+      } catch(_) {}
+    });
+  });
+
+  // 3. Aggregate wrong answers from student analysis files (more accurate than item analysis)
+  // itemId -> { attempted, correct, wrongTally{} }
+  const studentAgg = {};
+  teachers.filter(t => t.student).forEach(t => {
+    t.student.itemStats.forEach(s => {
+      const id = s.itemId;
+      if (!id) return;
+      if (!studentAgg[id]) studentAgg[id] = { attempted:0, correct:0, wrongTally:{} };
+      studentAgg[id].attempted += s.attempted;
+      studentAgg[id].correct += s.correct;
+      // Merge the full wrongTally from each section
+      Object.entries(s.wrongTally || {}).forEach(([ans, cnt]) => {
+        studentAgg[id].wrongTally[ans] = (studentAgg[id].wrongTally[ans] || 0) + cnt;
+      });
+    });
+  });
+
+  // 4. Student proficiency aggregated
+  const allStudentData = teachers.filter(t => t.student).map(t => t.student);
+  const totalStudents = allStudentData.reduce((a,s) => a + s.students.length, 0);
+  const totalProficient = allStudentData.reduce((a,s) => a + s.proficient, 0);
+  const proficiencyPct = totalStudents > 0 ? Math.round((totalProficient/totalStudents)*100) : 0;
+  const gradeDist = { A:0, B:0, C:0, D:0, F:0 };
+  allStudentData.forEach(s => { Object.keys(gradeDist).forEach(g => gradeDist[g] += s.gradeDist[g]); });
+
+  // ── Build prompt text ───────────────────────────────────────────────────────
+
+  // Overall stats block
+  let statsBlock = `COMBINED QUIZ STATS (${teachers.filter(t=>t.item).length} sections):\n`;
+  statsBlock += `Mean: ${overallMean}% | Median: ${overallMedian}% | High: ${overallHigh}% | Low: ${overallLow}%\n`;
+  if (totalStudents > 0) {
+    statsBlock += `Students: ${totalStudents} total | Proficient (>=70%): ${totalProficient} (${proficiencyPct}%) | Not proficient: ${totalStudents - totalProficient}\n`;
+    statsBlock += `Grade distribution: A(90%+): ${gradeDist.A} | B(80-89%): ${gradeDist.B} | C(70-79%): ${gradeDist.C} | D(60-69%): ${gradeDist.D} | F(<60%): ${gradeDist.F}\n`;
+  }
+
+  // ── Pre-compute strength and priority lists ─────────────────────────────────
+
+  // Strength: items where ALL difficulty values are >= 0.80
+  // Use studentAgg pct where available, else itemAgg pct
+  const strengthItems = Object.entries(itemAgg)
+    .filter(([id, agg]) => agg.difficulties.length > 0 && Math.min(...agg.difficulties) >= 0.80)
+    .map(([id, agg]) => {
+      const sa = studentAgg[id];
+      const finalPct = sa && sa.attempted > 0 ? Math.round((sa.correct/sa.attempted)*100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
+      const minDiff = Math.min(...agg.difficulties).toFixed(2);
+      const maxDiff = Math.max(...agg.difficulties).toFixed(2);
+      return { id, finalPct, minDiff: parseFloat(minDiff), maxDiff: parseFloat(maxDiff) };
+    })
+    .sort((a, b) => a.minDiff - b.minDiff)  // closest to 0.80 first
+    .slice(0, 5);
+
+  let strengthBlock = `ITEMS OF STRENGTH (all sections ≥ 0.80 difficulty — copy these exactly):\n`;
+  if (strengthItems.length === 0) {
+    strengthBlock += `  None — no items had all sections at difficulty ≥ 0.80\n`;
+  } else {
+    strengthItems.forEach(s => {
+      const diffStr = s.minDiff === s.maxDiff ? s.minDiff.toFixed(2) : `${s.minDiff.toFixed(2)}–${s.maxDiff.toFixed(2)}`;
+      strengthBlock += `  Item ${s.id}: ${s.finalPct}% correct (difficulty ${diffStr})\n`;
+    });
+  }
+
+  // Priority: items where ANY difficulty < 0.55 OR (difficulty < 0.80 AND ANY discrimination < 0.20)
+  // The "combined" flag marks items that are both moderately hard and low-discriminating
+  const priorityItems = Object.entries(itemAgg)
+    .filter(([id, agg]) => {
+      if (!agg.difficulties.length || !agg.discriminations.length) return false;
+      const lowDiff = Math.min(...agg.difficulties) < 0.55;
+      const combined = Math.min(...agg.difficulties) < 0.80 && Math.min(...agg.discriminations) < 0.20;
+      return lowDiff || combined;
+    })
+    .map(([id, agg]) => {
+      const sa = studentAgg[id];
+      const finalPct = sa && sa.attempted > 0 ? Math.round((sa.correct/sa.attempted)*100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
+      const finalIncorrect = sa ? (sa.attempted - sa.correct) : (agg.total - agg.correct);
+      const minDiff = Math.min(...agg.difficulties);
+      const maxDiff = Math.max(...agg.difficulties);
+      const minDisc = Math.min(...agg.discriminations);
+      const maxDisc = Math.max(...agg.discriminations);
+      const lowDiff = minDiff < 0.55;
+      const lowDisc = minDisc < 0.20;
+      const flag = lowDiff && lowDisc ? "LOW DIFFICULTY + LOW DISCRIMINATION" : lowDiff ? "LOW DIFFICULTY" : "LOW DISCRIMINATION";
+      let topWrong = "";
+      if (sa) {
+        const top = Object.entries(sa.wrongTally).sort((a,b) => b[1]-a[1])[0];
+        if (top) topWrong = `"${top[0]}" (n=${top[1]})`;
+      } else if (agg.topDistractor) {
+        topWrong = `"${agg.topDistractor}" (n=${agg.topDistractorCount})`;
+      }
+      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, topWrong, flag };
+    })
+    .sort((a, b) => a.minDiff - b.minDiff);  // hardest first
+
+  let priorityBlock = `PRIORITY ITEMS (copy these exactly, no additions or changes):\n`;
+  if (priorityItems.length === 0) {
+    priorityBlock += `  None\n`;
+  } else {
+    priorityItems.forEach(p => {
+      const diffStr = p.minDiff === p.maxDiff ? p.minDiff.toFixed(2) : `${p.minDiff.toFixed(2)}–${p.maxDiff.toFixed(2)}`;
+      const discStr = p.minDisc === p.maxDisc ? p.minDisc.toFixed(2) : `${p.minDisc.toFixed(2)}–${p.maxDisc.toFixed(2)}`;
+      priorityBlock += `  Item ${p.id} [${p.flag}]: ${p.finalPct}% correct, difficulty ${diffStr}, discrimination ${discStr}, ${p.finalIncorrect} students incorrect`;
+      if (p.topWrong) priorityBlock += `, top wrong answer: ${p.topWrong}`;
+      priorityBlock += `\n`;
+    });
+  }
+
+  // Quality flags: items where ANY discrimination < 0.20
+  const flagItems = Object.entries(itemAgg)
+    .filter(([id, agg]) => agg.discriminations.length > 0 && Math.min(...agg.discriminations) < 0.20)
+    .map(([id, agg]) => {
+      const minDisc = Math.min(...agg.discriminations);
+      const maxDisc = Math.max(...agg.discriminations);
+      const pct = agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0;
+      return { id, minDisc, maxDisc, pct };
+    });
+
+  let flagBlock = `ITEM QUALITY FLAGS (copy these exactly):\n`;
+  if (flagItems.length === 0) {
+    flagBlock += `  None\n`;
+  } else {
+    flagItems.forEach(f => {
+      const discStr = f.minDisc === f.maxDisc ? f.minDisc.toFixed(2) : `${f.minDisc.toFixed(2)}–${f.maxDisc.toFixed(2)}`;
+      flagBlock += `  Item ${f.id}: discrimination=${discStr}, ${f.pct}% correct\n`;
+    });
+  }
+
+  return `You are preparing a data synthesis for a PLC team meeting. Present exactly what is given — no additions, no interpretation, no recommendations.
+
+STRICT RULES:
+- All data below is pre-computed. Copy it exactly. Do NOT recalculate, reorder, or change any numbers.
+- Do NOT include any item in Items of Strength that is not in the ITEMS OF STRENGTH block below.
+- Do NOT include any item in Priority Items that is not in the PRIORITY ITEMS block below.
+- NEVER reference individual teachers, sections, or identifiers.
+- NEVER make recommendations or suggest next steps.
+- NEVER describe question content — quote distractor text exactly as given.
+
+${statsBlock}
+
+${strengthBlock}
+
+${priorityBlock}
+
+${flagBlock}
+
+Write the synthesis using these exact section headers. Copy the pre-computed data above directly into each section — do not alter any numbers or add any items not listed above.
+
+## 📊 Overall Performance
+State the combined mean, median, high, and low. Include proficiency rate and grade distribution if available. Three sentences maximum.
+
+## ✅ Items of Strength
+Copy the ITEMS OF STRENGTH list above exactly. One line per item. No additions.
+
+## ⚠️ Priority Items
+Copy the PRIORITY ITEMS list above exactly. Each item includes a flag in brackets indicating why it was flagged: LOW DIFFICULTY (difficulty < 0.55), LOW DISCRIMINATION (difficulty < 0.80 and discrimination < 0.20), or LOW DIFFICULTY + LOW DISCRIMINATION (both conditions). Include the flag label for each item. One item per entry. No additions.
+
+## 🔍 Item Quality Flags
+For each item in ITEM QUALITY FLAGS, state the item ID, discrimination value, and one sentence on what the value indicates about the item's ability to differentiate performance. No suggestions.`;
+}
+
+// ─── Markdown Renderer ──────────────────────────────────────────────────────
+
+function RenderMD({ text }) {
+  return (
+    <div style={{ fontSize: "0.9rem", lineHeight: 1.8, color: "#1f2937" }}>
+      {text.split("\n").map((line, i) => {
+        if (line.startsWith("## ")) return <h2 key={i} style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "1.4rem 0 0.4rem", fontFamily: "'Playfair Display', serif" }}>{line.slice(3)}</h2>;
+        if (line.startsWith("### ")) return <h3 key={i} style={{ color: "#374151", fontSize: "0.95rem", fontWeight: 600, margin: "0.8rem 0 0.2rem" }}>{line.slice(4)}</h3>;
+        if (line.startsWith("- ") || line.startsWith("• ")) {
+          const parts = line.slice(2).split(/\*\*(.*?)\*\*/g);
+          return <li key={i} style={{ marginLeft: "1.2rem", marginBottom: "0.3rem" }}>{parts.map((p, j) => j % 2 === 1 ? <strong key={j}>{p}</strong> : p)}</li>;
+        }
+        if (line.match(/^\d+\. /)) {
+          const parts = line.replace(/^\d+\. /, "").split(/\*\*(.*?)\*\*/g);
+          return <li key={i} style={{ marginLeft: "1.5rem", marginBottom: "0.3rem", listStyleType: "decimal" }}>{parts.map((p, j) => j % 2 === 1 ? <strong key={j}>{p}</strong> : p)}</li>;
+        }
+        if (!line.trim()) return <div key={i} style={{ height: "0.4rem" }} />;
+        const parts = line.split(/\*\*(.*?)\*\*/g);
+        return <p key={i} style={{ margin: "0 0 0.15rem" }}>{parts.map((p, j) => j % 2 === 1 ? <strong key={j}>{p}</strong> : p)}</p>;
+      })}
+    </div>
+  );
+}
+
+// ─── Teacher Card ────────────────────────────────────────────────────────────
+
+function TeacherCard({ teacher, onRemove, onAddFile }) {
+  const { label, item, student } = teacher;
+  const hasItem = !!item;
+  const hasStudent = !!student;
+
+  return (
+    <div style={{ background: "white", borderRadius: 12, padding: "1rem 1.1rem", boxShadow: "0 2px 12px rgba(30,58,138,0.08)", borderTop: "4px solid #2563eb" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ fontWeight: 700, color: "#1e3a8a", fontSize: "0.95rem" }}>{label}</div>
+        <button onClick={() => onRemove(label)} style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: "1rem", padding: 0 }}>✕</button>
+      </div>
+
+      {/* File type badges */}
+      <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+        <span style={{ background: hasItem ? "#dcfce7" : "#f3f4f6", color: hasItem ? "#16a34a" : "#9ca3af", borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.72rem", fontWeight: 600 }}>
+          {hasItem ? "✓" : "○"} Item Analysis
+        </span>
+        <span style={{ background: hasStudent ? "#dcfce7" : "#f3f4f6", color: hasStudent ? "#16a34a" : "#9ca3af", borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.72rem", fontWeight: 600 }}>
+          {hasStudent ? "✓" : "○"} Student Analysis
+        </span>
+        {(!hasItem || !hasStudent) && (
+          <button onClick={() => onAddFile(label)} style={{ background: "#eff6ff", color: "#3b82f6", border: "1px dashed #93c5fd", borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.72rem", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+            + Add missing file
+          </button>
+        )}
+      </div>
+
+      {/* Stats */}
+      {hasItem && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "0.4rem", marginTop: "0.6rem" }}>
+          {[
+            ["Mean", parseFloat(item.summary.QuizMeanScore).toFixed(1) + "%"],
+            ["Median", parseFloat(item.summary.QuizMedianScore).toFixed(1) + "%"],
+            ["SD", parseFloat(item.summary.QuizStandardDeviation).toFixed(1)]
+          ].map(([l, v]) => (
+            <div key={l} style={{ background: "#f0f4ff", borderRadius: 7, padding: "0.35rem", textAlign: "center" }}>
+              <div style={{ fontWeight: 700, color: "#1e3a8a", fontSize: "0.88rem" }}>{v}</div>
+              <div style={{ fontSize: "0.65rem", color: "#6b7280" }}>{l}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {hasStudent && (
+        <div style={{ marginTop: "0.6rem" }}>
+          {/* Proficiency bar */}
+          <div style={{ marginBottom: "0.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.72rem", fontWeight: 700, marginBottom: "0.2rem" }}>
+              <span style={{ color: "#1e3a8a" }}>% Proficient (≥70%)</span>
+              <span style={{ color: student.proficiencyPct >= 70 ? "#16a34a" : "#dc2626" }}>{student.proficiencyPct}%</span>
+            </div>
+            <div style={{ height: 8, background: "#e5e7eb", borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ width: student.proficiencyPct + "%", height: "100%", background: student.proficiencyPct >= 70 ? "#16a34a" : student.proficiencyPct >= 50 ? "#d97706" : "#dc2626", borderRadius: 4 }} />
+            </div>
+            <div style={{ fontSize: "0.68rem", color: "#6b7280", marginTop: "0.15rem" }}>
+              {student.proficient} proficient · {student.notProficient} not proficient · {student.students.length} total
+            </div>
+          </div>
+          {/* Grade distribution bar chart */}
+          <div>
+            <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "#6b7280", marginBottom: "0.3rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Grade Distribution</div>
+            {(() => {
+              const PX_PER = 3;
+              const maxCount = Math.max(...Object.values(student.gradeDist), 1);
+              const chartH = maxCount * PX_PER + 16;
+              return (
+                <div style={{ display: "flex", alignItems: "flex-end", gap: "0.2rem", height: chartH }}>
+                  {[["A","#16a34a"],["B","#65a30d"],["C","#d97706"],["D","#ea580c"],["F","#dc2626"]].map(([g, color]) => {
+                    const count = student.gradeDist[g];
+                    const barH = count * PX_PER;
+                    return (
+                      <div key={g} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: "0.1rem", justifyContent: "flex-end" }}>
+                        {count > 0 && <div style={{ fontSize: "0.58rem", fontWeight: 700, color }}>{count}</div>}
+                        <div style={{ width: "100%", height: barH, background: color, borderRadius: "2px 2px 0 0", minHeight: count > 0 ? 2 : 0 }} />
+                        <div style={{ fontSize: "0.6rem", fontWeight: 700, color, lineHeight: 1 }}>{g}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────────────────────────────────
+
+function App() {
+  const [teachers, setTeachers] = useState([]); // [{ label, item, student }]
+  const [analysis, setAnalysis] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [apiError, setApiError] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const [activeTab, setActiveTab] = useState("upload");
+  const [pendingLabel, setPendingLabel] = useState(null); // for "add missing file"
+
+  const processFiles = useCallback(async (fileList, forLabel = null) => {
+    setError("");
+    for (const file of Array.from(fileList)) {
+      if (!file.name.endsWith(".csv")) continue;
+      try {
+        const text = await file.text();
+        const rows = parseCSVFull(text);
+        const type = detectFileType(rows);
+        if (!type) { setError(`Could not detect file type for "${file.name}". Make sure it's a Canvas item or student analysis CSV.`); continue; }
+
+        // Derive label: use forLabel if patching, else from filename
+        const fileLabel = forLabel || file.name.replace(/\.csv$/i, "")
+          .replace(/[_-]?(item[_-]?analysis|student[_-]?analysis|item|student)[_-]?/gi, "")
+          .replace(/[_-]/g, " ").trim() || file.name.replace(/\.csv$/i, "");
+
+        const parsed = type === "item" ? parseItemCSV(rows, fileLabel) : parseStudentCSV(rows, fileLabel);
+
+        setTeachers(prev => {
+          const existing = prev.find(t => t.label === fileLabel);
+          if (existing) {
+            return prev.map(t => t.label === fileLabel ? { ...t, [type]: parsed } : t);
+          }
+          return [...prev, { label: fileLabel, item: type === "item" ? parsed : null, student: type === "student" ? parsed : null }];
+        });
+      } catch (e) {
+        setError(`Error parsing "${file.name}": ${e.message}`);
+      }
+    }
+    setActiveTab("data");
+    setPendingLabel(null);
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault(); setDragOver(false);
+    processFiles(e.dataTransfer.files, pendingLabel);
+  }, [processFiles, pendingLabel]);
+
+  const removeTeacher = (label) => setTeachers(prev => prev.filter(t => t.label !== label));
+
+  const triggerAddFile = (label) => {
+    setPendingLabel(label);
+    document.getElementById("fileInAdd").click();
+  };
+
+  const generateAnalysis = async () => {
+    if (!teachers.length) return;
+    setLoading(true); setAnalysis(""); setApiError("");
+    setActiveTab("analysis");
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: buildPrompt(teachers) }]
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const text = (data.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+      if (!text) throw new Error("Empty response from API");
+      // Strip any preamble before the first ## section header
+      const firstHeader = text.indexOf("\n## ");
+      setAnalysis(firstHeader > 0 ? text.slice(firstHeader + 1) : text);
+    } catch (e) {
+      setApiError(`Analysis failed: ${e.message}`);
+    }
+    setLoading(false);
+  };
+
+  const TAB = (id) => ({
+    padding: "0.45rem 1.1rem", border: "none", cursor: "pointer",
+    fontSize: "0.82rem", fontWeight: 600, fontFamily: "inherit",
+    borderRadius: "7px 7px 0 0",
+    background: activeTab === id ? "white" : "rgba(255,255,255,0.18)",
+    color: activeTab === id ? "#1e3a8a" : "white",
+    transition: "all 0.15s",
+  });
+
+  return (
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "#eef2ff", fontFamily: "'DM Sans', sans-serif", overflow: "hidden" }}>
+      <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{ background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)", padding: "1.5rem 2rem 0", boxShadow: "0 4px 24px rgba(30,58,138,0.35)", flexShrink: 0 }}>
+        <div style={{ maxWidth: 960, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <span style={{ fontSize: "1.7rem" }}>📚</span>
+            <div>
+              <h1 style={{ margin: 0, color: "white", fontSize: "1.4rem", fontFamily: "'Playfair Display', serif" }}>Canvas PLC Item Analyzer</h1>
+              <p style={{ margin: 0, color: "#bfdbfe", fontSize: "0.78rem" }}>Upload item & student analysis CSVs per teacher · Compare sections · Get AI-powered PLC insights</p>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "0.4rem", marginTop: "1rem" }}>
+            {[["upload","📁 Upload"], ["data","📊 Data"], ["analysis","🧠 AI Report"]].map(([id, lbl]) => (
+              <button key={id} onClick={() => setActiveTab(id)} style={TAB(id)}>{lbl}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Scrollable content */}
+      <div style={{ flex: 1, overflowY: "auto" }}>
+        <div style={{ maxWidth: 960, margin: "0 auto", padding: "1.5rem 1.5rem 4rem" }}>
+
+          {error && <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "0.7rem 1rem", marginBottom: "1rem", color: "#b91c1c", fontSize: "0.85rem" }}>⚠️ {error}</div>}
+
+          {/* Hidden input for "add missing file" */}
+          <input id="fileInAdd" type="file" accept=".csv" multiple onChange={e => processFiles(e.target.files, pendingLabel)} style={{ display: "none" }} />
+
+          {/* ── UPLOAD TAB ── */}
+          {activeTab === "upload" && (
+            <div>
+              <div
+                onDrop={handleDrop}
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onClick={() => document.getElementById("fileIn").click()}
+                style={{
+                  border: `2.5px dashed ${dragOver ? "#3b82f6" : "#93c5fd"}`,
+                  borderRadius: 16, padding: "2.5rem 2rem", textAlign: "center",
+                  background: dragOver ? "#eff6ff" : "white", cursor: "pointer",
+                  transition: "all 0.2s", boxShadow: "0 2px 16px rgba(30,58,138,0.08)"
+                }}
+              >
+                <div style={{ fontSize: "2.5rem", marginBottom: "0.6rem" }}>📂</div>
+                <p style={{ margin: "0 0 0.35rem", fontSize: "1.05rem", fontWeight: 700, color: "#1e3a8a" }}>Drop CSV files here</p>
+                <p style={{ margin: "0 0 0.75rem", color: "#6b7280", fontSize: "0.85rem" }}>
+                  Drop item analysis <em>and/or</em> student analysis files — the tool auto-detects which is which
+                </p>
+                <div style={{ display: "flex", justifyContent: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+                  {["Smith_item.csv", "Smith_student.csv", "Jones_item.csv", "Jones_student.csv"].map(f => (
+                    <span key={f} style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.2rem 0.6rem", fontSize: "0.75rem", fontWeight: 600 }}>{f}</span>
+                  ))}
+                </div>
+                <button style={{ background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.55rem 1.4rem", fontSize: "0.875rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  Browse Files
+                </button>
+                <input id="fileIn" type="file" accept=".csv" multiple onChange={e => processFiles(e.target.files)} style={{ display: "none" }} />
+              </div>
+
+              {teachers.length > 0 && (
+                <div style={{ marginTop: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                  <span style={{ color: "#6b7280", fontSize: "0.8rem", fontWeight: 600 }}>LOADED:</span>
+                  {teachers.map(t => (
+                    <span key={t.label} style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                      {t.label} {t.item && t.student ? "✓✓" : "✓"}
+                      <span onClick={() => removeTeacher(t.label)} style={{ cursor: "pointer", color: "#3b82f6", fontWeight: 700 }}>✕</span>
+                    </span>
+                  ))}
+                  <button onClick={() => setActiveTab("data")} style={{ marginLeft: "auto", background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.4rem 1rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    View Data →
+                  </button>
+                </div>
+              )}
+
+              <div style={{ marginTop: "1.25rem", background: "white", borderRadius: 12, padding: "1.1rem 1.4rem", boxShadow: "0 2px 12px rgba(30,58,138,0.06)" }}>
+                <h3 style={{ margin: "0 0 0.6rem", color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "0.95rem" }}>How it works</h3>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", fontSize: "0.82rem", color: "#4b5563" }}>
+                  <div style={{ background: "#f8fafc", borderRadius: 8, padding: "0.75rem" }}>
+                    <div style={{ fontWeight: 700, color: "#1e3a8a", marginBottom: "0.3rem" }}>📋 Item Analysis CSV</div>
+                    <div>Canvas → Quizzes → Quiz → <strong>Item Analysis</strong> → Export CSV</div>
+                    <div style={{ marginTop: "0.3rem", color: "#6b7280" }}>Shows difficulty, discrimination, and distractor data per question</div>
+                  </div>
+                  <div style={{ background: "#f8fafc", borderRadius: 8, padding: "0.75rem" }}>
+                    <div style={{ fontWeight: 700, color: "#1e3a8a", marginBottom: "0.3rem" }}>👥 Student Analysis CSV</div>
+                    <div>Canvas → Quizzes → Quiz → <strong>Student Analysis</strong> → Export CSV</div>
+                    <div style={{ marginTop: "0.3rem", color: "#6b7280" }}>Shows each student's score and response per question</div>
+                  </div>
+                </div>
+                <p style={{ margin: "0.75rem 0 0", fontSize: "0.8rem", color: "#6b7280" }}>
+                  💡 <strong>Naming tip:</strong> Include the teacher name in the filename (e.g. <em>Smith_item_analysis.csv</em> and <em>Smith_student_analysis.csv</em>) — the tool will pair them automatically.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* ── DATA TAB ── */}
+          {activeTab === "data" && teachers.length === 0 && (
+            <div style={{ textAlign: "center", padding: "3rem", color: "#6b7280" }}>
+              <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>📭</div>
+              <p>No data yet.</p>
+              <button onClick={() => setActiveTab("upload")} style={{ background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.5rem 1.2rem", fontFamily: "inherit", fontWeight: 600, cursor: "pointer" }}>Upload Files</button>
+            </div>
+          )}
+
+          {activeTab === "data" && teachers.length > 0 && (
+            <div>
+              {/* Teacher cards grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", marginBottom: "1.25rem" }}>
+                {teachers.map(t => (
+                  <TeacherCard key={t.label} teacher={t} onRemove={removeTeacher} onAddFile={triggerAddFile} />
+                ))}
+                <div onClick={() => document.getElementById("fileIn2").click()}
+                  style={{ border: "2px dashed #93c5fd", borderRadius: 12, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "white", color: "#3b82f6", gap: "0.3rem", minHeight: 120, padding: "1rem" }}>
+                  <span style={{ fontSize: "1.5rem" }}>＋</span>
+                  <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Add more files</span>
+                  <input id="fileIn2" type="file" accept=".csv" multiple onChange={e => processFiles(e.target.files)} style={{ display: "none" }} />
+                </div>
+              </div>
+
+              {/* Item table */}
+              {teachers.some(t => t.item) && (
+                <div style={{ background: "white", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 12px rgba(30,58,138,0.07)", marginBottom: "1.25rem" }}>
+                  <div style={{ padding: "0.85rem 1.25rem", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h3 style={{ margin: 0, color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "0.95rem" }}>Item Analysis</h3>
+                    {teachers.length > 1 && <span style={{ fontSize: "0.75rem", color: "#6b7280" }}>All sections</span>}
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                      <thead>
+                        <tr style={{ background: "#f8fafc" }}>
+                          {["#", ...(teachers.length > 1 ? ["Teacher"] : []), "Item ID", "Difficulty", "Level", "✓", "✗", "% Correct", "Discrimination", "Quality"].map(h => (
+                            <th key={h} style={{ padding: "0.5rem 0.65rem", textAlign: "left", color: "#374151", fontWeight: 700, borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap", fontSize: "0.75rem" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {teachers.flatMap(t => (t.item?.items || []).map(item => ({ ...item, _label: t.label }))).map((item, i) => {
+                          const diff = classifyDifficulty(item.ItemDifficulty);
+                          const disc = classifyDiscrimination(item.DiscriminationIndex);
+                          const correct = parseInt(item.Correct) || 0;
+                          const incorrect = parseInt(item.Incorrect) || 0;
+                          const total = correct + incorrect;
+                          const pct = total > 0 ? Math.round((correct / total) * 100) : 0;
+                          return (
+                            <tr key={i} style={{ borderBottom: "1px solid #f3f4f6", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                              <td style={{ padding: "0.45rem 0.65rem", color: "#9ca3af" }}>{i + 1}</td>
+                              {teachers.length > 1 && <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.1rem 0.4rem", fontSize: "0.68rem", fontWeight: 600 }}>{item._label}</span></td>}
+                              <td style={{ padding: "0.45rem 0.65rem", color: "#6b7280", fontFamily: "monospace", fontSize: "0.75rem" }}>{item.ItemID}</td>
+                              <td style={{ padding: "0.45rem 0.65rem", fontWeight: 600 }}>{parseFloat(item.ItemDifficulty).toFixed(2)}</td>
+                              <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: diff.color + "18", color: diff.color, padding: "0.1rem 0.4rem", borderRadius: 20, fontSize: "0.7rem", fontWeight: 700 }}>{diff.label}</span></td>
+                              <td style={{ padding: "0.45rem 0.65rem", color: "#16a34a", fontWeight: 700 }}>{correct}</td>
+                              <td style={{ padding: "0.45rem 0.65rem", color: "#dc2626", fontWeight: 700 }}>{incorrect}</td>
+                              <td style={{ padding: "0.45rem 0.65rem" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                                  <div style={{ width: 44, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                    <div style={{ width: `${pct}%`, height: "100%", background: pct >= 80 ? "#16a34a" : pct >= 50 ? "#d97706" : "#dc2626", borderRadius: 3 }} />
+                                  </div>
+                                  <span style={{ fontWeight: 600 }}>{pct}%</span>
+                                </div>
+                              </td>
+                              <td style={{ padding: "0.45rem 0.65rem", fontWeight: 600 }}>{parseFloat(item.DiscriminationIndex).toFixed(2)}</td>
+                              <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: disc.color + "18", color: disc.color, padding: "0.1rem 0.4rem", borderRadius: 20, fontSize: "0.7rem", fontWeight: 700 }}>{disc.label}</span></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Student score table */}
+              {teachers.some(t => t.student) && (() => {
+                const allStudents = teachers.flatMap(t => t.student?.students || []);
+                const totalProf = allStudents.filter(s => s.pct >= 70).length;
+                const totalProfPct = allStudents.length > 0 ? Math.round((totalProf / allStudents.length) * 100) : 0;
+                const aggGrade = {
+                  A: allStudents.filter(s => s.pct >= 90).length,
+                  B: allStudents.filter(s => s.pct >= 80 && s.pct < 90).length,
+                  C: allStudents.filter(s => s.pct >= 70 && s.pct < 80).length,
+                  D: allStudents.filter(s => s.pct >= 60 && s.pct < 70).length,
+                  F: allStudents.filter(s => s.pct < 60).length,
+                };
+                return (
+                  <div style={{ background: "white", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 12px rgba(30,58,138,0.07)", marginBottom: "1.25rem" }}>
+                    <div style={{ padding: "0.85rem 1.25rem", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <h3 style={{ margin: 0, color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "0.95rem" }}>Student Scores</h3>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "0.75rem", color: "#6b7280" }}>All sections · {allStudents.length} students</span>
+                        <span style={{ background: totalProfPct >= 70 ? "#dcfce7" : "#fee2e2", color: totalProfPct >= 70 ? "#16a34a" : "#dc2626", borderRadius: 20, padding: "0.2rem 0.65rem", fontSize: "0.75rem", fontWeight: 700 }}>
+                          {totalProfPct}% Proficient
+                        </span>
+                        {(() => {
+                          const PX_PER = 4;
+                          const maxCount = Math.max(...Object.values(aggGrade), 1);
+                          const chartH = maxCount * PX_PER + 16;
+                          return (
+                            <div style={{ display: "flex", alignItems: "flex-end", gap: "0.2rem", height: chartH }}>
+                              {[["A","#16a34a"],["B","#65a30d"],["C","#d97706"],["D","#ea580c"],["F","#dc2626"]].map(([g, color]) => {
+                                const count = aggGrade[g];
+                                const barH = count * PX_PER;
+                                return (
+                                  <div key={g} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.1rem", width: 28, justifyContent: "flex-end" }}>
+                                    {count > 0 && <div style={{ fontSize: "0.6rem", fontWeight: 700, color }}>{count}</div>}
+                                    <div style={{ width: "100%", height: barH, background: color, borderRadius: "2px 2px 0 0", minHeight: count > 0 ? 3 : 0 }} />
+                                    <div style={{ fontSize: "0.62rem", fontWeight: 700, color }}>{g}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                        <thead>
+                          <tr style={{ background: "#f8fafc" }}>
+                            {["Student", ...(teachers.length > 1 ? ["Teacher"] : []), "Score", "% Score", "Grade", "Proficiency"].map(h => (
+                              <th key={h} style={{ padding: "0.5rem 0.65rem", textAlign: "left", color: "#374151", fontWeight: 700, borderBottom: "2px solid #e5e7eb", fontSize: "0.75rem" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {teachers.flatMap(t => (t.student?.students || []).map(s => ({ ...s, _label: t.label }))).sort((a, b) => a.pct - b.pct).map((s, i) => {
+                            const grade = s.pct >= 90 ? "A" : s.pct >= 80 ? "B" : s.pct >= 70 ? "C" : s.pct >= 60 ? "D" : "F";
+                            const gradeColor = s.pct >= 90 ? "#16a34a" : s.pct >= 80 ? "#65a30d" : s.pct >= 70 ? "#d97706" : s.pct >= 60 ? "#ea580c" : "#dc2626";
+                            const gradeBg = s.pct >= 90 ? "#dcfce7" : s.pct >= 80 ? "#f0fdf4" : s.pct >= 70 ? "#fef9c3" : s.pct >= 60 ? "#fff7ed" : "#fee2e2";
+                            const proficient = s.pct >= 70;
+                            return (
+                              <tr key={i} style={{ borderBottom: "1px solid #f3f4f6", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                                <td style={{ padding: "0.45rem 0.65rem", fontWeight: 500 }}>{s.name}</td>
+                                {teachers.length > 1 && <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.1rem 0.4rem", fontSize: "0.68rem", fontWeight: 600 }}>{s._label}</span></td>}
+                                <td style={{ padding: "0.45rem 0.65rem" }}>{s.overall}/{s.possible}</td>
+                                <td style={{ padding: "0.45rem 0.65rem" }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                                    <div style={{ width: 50, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                      <div style={{ width: `${s.pct}%`, height: "100%", background: gradeColor, borderRadius: 3 }} />
+                                    </div>
+                                    <span style={{ fontWeight: 600 }}>{s.pct}%</span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: gradeBg, color: gradeColor, borderRadius: 20, padding: "0.1rem 0.45rem", fontSize: "0.75rem", fontWeight: 800 }}>{grade}</span></td>
+                                <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: proficient ? "#dcfce7" : "#fee2e2", color: proficient ? "#16a34a" : "#dc2626", borderRadius: 20, padding: "0.1rem 0.45rem", fontSize: "0.7rem", fontWeight: 700 }}>{proficient ? "Proficient" : "Not Proficient"}</span></td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div style={{ textAlign: "center" }}>
+                <button onClick={generateAnalysis} disabled={loading}
+                  style={{ background: loading ? "#93c5fd" : "linear-gradient(135deg, #1e40af, #3b82f6)", color: "white", border: "none", borderRadius: 10, padding: "0.85rem 2.5rem", fontSize: "1rem", fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", boxShadow: loading ? "none" : "0 4px 18px rgba(30,64,175,0.35)" }}>
+                  {loading ? "⏳ Analyzing…" : `🧠 Generate PLC Report`}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── ANALYSIS TAB ── */}
+          {activeTab === "analysis" && (
+            <div>
+              {apiError && (
+                <div style={{ background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "0.75rem 1rem", marginBottom: "1rem", color: "#b91c1c", fontSize: "0.875rem" }}>
+                  ⚠️ {apiError}
+                </div>
+              )}
+              {loading && (
+                <div style={{ textAlign: "center", padding: "3rem", background: "white", borderRadius: 12, boxShadow: "0 2px 12px rgba(30,58,138,0.07)" }}>
+                  <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>⏳</div>
+                  <p style={{ color: "#1e3a8a", fontWeight: 700, margin: "0 0 0.25rem" }}>Generating your PLC report…</p>
+                  <p style={{ color: "#6b7280", fontSize: "0.85rem", margin: 0 }}>
+                    Synthesizing {teachers.filter(t => t.item).length} item analysis + {teachers.filter(t => t.student).length} student analysis file(s)
+                  </p>
+                </div>
+              )}
+              {!loading && !analysis && !apiError && (
+                <div style={{ textAlign: "center", padding: "3rem", color: "#6b7280" }}>
+                  <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>🧠</div>
+                  <p>Go to the <strong>Data tab</strong> and click <strong>Generate PLC Report</strong>.</p>
+                  <button onClick={() => setActiveTab(teachers.length ? "data" : "upload")} style={{ background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.5rem 1.2rem", fontFamily: "inherit", fontWeight: 600, cursor: "pointer" }}>
+                    {teachers.length ? "Go to Data →" : "Upload Files →"}
+                  </button>
+                </div>
+              )}
+              {!loading && analysis && (
+                <div>
+                  <div style={{ background: "white", borderRadius: 12, padding: "1.75rem 2rem", boxShadow: "0 2px 12px rgba(30,58,138,0.07)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem", paddingBottom: "1rem", borderBottom: "2px solid #e0e7ff" }}>
+                      <div>
+                        <h2 style={{ margin: "0 0 0.2rem", color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "1.2rem" }}>PLC Analysis Report</h2>
+                        <p style={{ margin: 0, color: "#6b7280", fontSize: "0.75rem" }}>{teachers.map(t => t.label).join(" · ")}</p>
+                      </div>
+                      <button onClick={() => navigator.clipboard?.writeText(analysis)}
+                        style={{ background: "#f0f4ff", color: "#1e40af", border: "1px solid #bfdbfe", borderRadius: 7, padding: "0.4rem 0.9rem", fontSize: "0.8rem", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                        📋 Copy
+                      </button>
+                    </div>
+                    {/* Grade distribution bar chart — shown when student data exists */}
+                    {teachers.some(t => t.student) && (() => {
+                      const allStudents = teachers.flatMap(t => t.student?.students || []);
+                      const aggGrade = {
+                        A: allStudents.filter(s => s.pct >= 90).length,
+                        B: allStudents.filter(s => s.pct >= 80 && s.pct < 90).length,
+                        C: allStudents.filter(s => s.pct >= 70 && s.pct < 80).length,
+                        D: allStudents.filter(s => s.pct >= 60 && s.pct < 70).length,
+                        F: allStudents.filter(s => s.pct < 60).length,
+                      };
+                      const proficient = allStudents.filter(s => s.pct >= 70).length;
+                      const profPct = allStudents.length > 0 ? Math.round((proficient / allStudents.length) * 100) : 0;
+                      const maxCount = Math.max(...Object.values(aggGrade), 1);
+                      return (
+                        <div style={{ background: "#f8fafc", borderRadius: 10, padding: "1rem 1.25rem", marginBottom: "1.25rem", border: "1px solid #e0e7ff" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "1.5rem", flexWrap: "wrap" }}>
+                            {/* Bar chart */}
+                            <div style={{ flex: 1, minWidth: 180 }}>
+                              <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>Grade Distribution — All Sections</div>
+                              {(() => {
+                                const PX_PER = 4;
+                                const chartH = maxCount * PX_PER + 20;
+                                return (
+                                  <div style={{ display: "flex", alignItems: "flex-end", gap: "0.5rem", height: chartH }}>
+                                    {[["A","#16a34a"],["B","#65a30d"],["C","#d97706"],["D","#ea580c"],["F","#dc2626"]].map(([g, color]) => {
+                                      const count = aggGrade[g];
+                                      const barH = count * PX_PER;
+                                      return (
+                                        <div key={g} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: "0.2rem", justifyContent: "flex-end" }}>
+                                          <div style={{ fontSize: "0.7rem", fontWeight: 700, color, minHeight: "0.9rem" }}>{count > 0 ? count : ""}</div>
+                                          <div style={{ width: "100%", height: barH, background: color, borderRadius: "4px 4px 0 0", minHeight: count > 0 ? 4 : 0 }} />
+                                          <div style={{ fontSize: "0.72rem", fontWeight: 700, color }}>{g}</div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                            {/* Proficiency summary */}
+                            <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: "0.4rem", minWidth: 140 }}>
+                              <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Proficiency (≥70%)</div>
+                              <div style={{ fontSize: "2rem", fontWeight: 800, color: profPct >= 70 ? "#16a34a" : profPct >= 50 ? "#d97706" : "#dc2626", lineHeight: 1 }}>{profPct}%</div>
+                              <div style={{ height: 6, background: "#e5e7eb", borderRadius: 3, overflow: "hidden", width: "100%" }}>
+                                <div style={{ width: profPct + "%", height: "100%", background: profPct >= 70 ? "#16a34a" : profPct >= 50 ? "#d97706" : "#dc2626", borderRadius: 3 }} />
+                              </div>
+                              <div style={{ fontSize: "0.72rem", color: "#6b7280" }}>{proficient} of {allStudents.length} students</div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "0.6rem 0.9rem", marginBottom: "1rem", fontSize: "0.78rem", color: "#92400e", display: "flex", gap: "0.5rem" }}>
+                      <span>⚠️</span>
+                      <span><strong>What the AI can and can't see:</strong> The report is based on item IDs, difficulty scores, discrimination indexes, and wrong-answer (distractor) text. The AI does <em>not</em> have access to the actual question wording — any description of what a question is asking is inferred from distractor text only, not from the question itself.</span>
+                    </div>
+
+                    {/* Flag legend */}
+                    <div style={{ background: "#f8fafc", border: "1px solid #e0e7ff", borderRadius: 8, padding: "0.85rem 1rem", marginBottom: "1.25rem" }}>
+                      <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#1e3a8a", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>Priority Item Flag Guide</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+                        {[
+                          ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered correctly. Students are struggling with this content."],
+                          ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Difficulty is below 0.80 and discrimination is below 0.20. The item is not effectively distinguishing between students who have mastered the content and those who haven't."],
+                          ["LOW DIFFICULTY + LOW DISCRIMINATION", "#7c2d12", "#fff7ed", "Both conditions above are present. Students are struggling and the item is not providing useful diagnostic information."],
+                        ].map(([label, color, bg, desc]) => (
+                          <div key={label} style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
+                            <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", marginTop: "0.15rem", flexShrink: 0 }}>{label}</span>
+                            <span style={{ fontSize: "0.78rem", color: "#4b5563", lineHeight: 1.5 }}>{desc}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <RenderMD text={analysis} />
+                  </div>
+                  <div style={{ textAlign: "center", marginTop: "1rem" }}>
+                    <button onClick={generateAnalysis} style={{ background: "white", color: "#1e40af", border: "2px solid #bfdbfe", borderRadius: 9, padding: "0.55rem 1.4rem", fontSize: "0.85rem", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      🔄 Regenerate
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
