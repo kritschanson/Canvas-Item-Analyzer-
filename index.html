@@ -973,8 +973,8 @@ function App() {
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                           {[
                             ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered this item correctly. Most students struggled with it."],
-                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Students who scored high overall and students who scored low overall answered this item at about the same rate. It didn\'t help tell the difference between who knows the content and who doesn\'t. Often appears on very easy items — not always alarming, but the item isn\'t doing much diagnostic work."],
-                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Students who did well on the quiz overall did not reliably get this item right. Getting it right or wrong didn\'t predict overall performance. The item may be testing a different skill than the rest of the quiz — worth examining whether it aligns with the learning target."],
+                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Students who scored high overall and students who scored low overall answered this item at about the same rate (Discrimination Index below 0.20). It didn\'t help tell the difference between who knows the content and who doesn\'t. Often appears on very easy items — not always alarming, but the item isn\'t doing much diagnostic work."],
+                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Students who did well on the quiz overall did not reliably get this item right (Corrected Item-Total Correlation below 0.30). Getting it right or wrong didn\'t predict overall performance. The item may be testing a different skill than the rest of the quiz — worth examining whether it aligns with the learning target."],
                           ].map(([label, color, bg, desc]) => (
                             <div key={label} style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
                               <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", marginTop: "0.15rem", flexShrink: 0 }}>{label}</span>
@@ -1153,9 +1153,9 @@ function App() {
                                 <tr key={p.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
                                   <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{p.id}</td>
                                   <td style={{ padding: "0.45rem 0.75rem", fontWeight: 700, color: "#16a34a" }}>{p.finalPct}%</td>
-                                  <td style={{ padding: "0.45rem 0.75rem" }}>{p.combinedDiff.toFixed(2)}</td>
-                                  <td style={{ padding: "0.45rem 0.75rem", color: "#d97706", fontWeight: 600 }}>{p.combinedDisc !== null ? p.combinedDisc.toFixed(2) : "N/A"}</td>
-                                  <td style={{ padding: "0.45rem 0.75rem", color: p.combinedCITC !== null && p.combinedCITC < 0.30 ? "#7c3aed" : "#374151", fontWeight: p.combinedCITC !== null && p.combinedCITC < 0.30 ? 700 : 400 }}>{p.combinedCITC !== null ? p.combinedCITC.toFixed(2) : "N/A"}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{p.combinedDiff.toFixed(2)}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", color: "#6b7280" }}>{p.combinedDisc !== null ? p.combinedDisc.toFixed(2) : "N/A"}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", color: "#6b7280" }}>{p.combinedCITC !== null ? p.combinedCITC.toFixed(2) : "N/A"}</td>
                                   <td style={{ padding: "0.45rem 0.75rem" }}>
                                     {p.smallSample
                                       ? <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 4, padding: "0.1rem 0.4rem", fontSize: "0.7rem", fontWeight: 700 }}>⚠️ {p.combinedN}</span>
