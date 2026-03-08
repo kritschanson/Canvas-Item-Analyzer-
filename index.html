@@ -216,13 +216,13 @@ function buildReport(teachers) {
   });
 
   // 3. Aggregate wrong answers from student analysis files (more accurate than item analysis)
-  // itemId -> { attempted, correct, wrongTally{}, studentsWrong[] }
+  // itemId -> { attempted, correct, wrongTally{}, studentsWrongByTeacher: {label: [names]} }
   const studentAgg = {};
   teachers.filter(t => t.student).forEach(t => {
     t.student.itemStats.forEach(s => {
       const id = s.itemId;
       if (!id) return;
-      if (!studentAgg[id]) studentAgg[id] = { attempted:0, correct:0, wrongTally:{}, studentsWrong:[] };
+      if (!studentAgg[id]) studentAgg[id] = { attempted:0, correct:0, wrongTally:{}, studentsWrongByTeacher:{} };
       studentAgg[id].attempted += s.attempted;
       studentAgg[id].correct += s.correct;
       // Merge the full wrongTally from each section
@@ -230,7 +230,7 @@ function buildReport(teachers) {
         studentAgg[id].wrongTally[ans] = (studentAgg[id].wrongTally[ans] || 0) + cnt;
       });
     });
-    // Track which students got each item wrong
+    // Track which students got each item wrong, grouped by teacher label
     t.student.students.forEach(stu => {
       t.student.itemStats.forEach(s => {
         const id = s.itemId;
@@ -238,7 +238,10 @@ function buildReport(teachers) {
         const idx = t.student.itemStats.indexOf(s);
         const it = stu.items[idx];
         if (it && it.status !== "Not Attempted" && it.earned === 0) {
-          studentAgg[id].studentsWrong.push(stu.name);
+          if (!studentAgg[id].studentsWrongByTeacher[t.label]) {
+            studentAgg[id].studentsWrongByTeacher[t.label] = [];
+          }
+          studentAgg[id].studentsWrongByTeacher[t.label].push(stu.name);
         }
       });
     });
@@ -278,7 +281,7 @@ function buildReport(teachers) {
     .sort((a, b) => a.minDiff - b.minDiff)  // closest to 0.80 first
     .slice(0, 5);
 
-  let strengthBlock = `ITEMS OF STRENGTH (all sections ≥ 0.80 difficulty — copy these exactly):\n`;
+  let strengthBlock = `ITEMS WITH HIGH MASTERY (all sections ≥ 0.80 difficulty — copy these exactly):\n`;
   if (strengthItems.length === 0) {
     strengthBlock += `  None — no items had all sections at difficulty ≥ 0.80\n`;
   } else {
@@ -316,7 +319,7 @@ function buildReport(teachers) {
         topWrong = `"${agg.topDistractor}" (n=${agg.topDistractorCount})`;
       }
       return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, topWrong, flag,
-        studentsWrong: (studentAgg[id]?.studentsWrong || []).sort() };
+        studentsWrongByTeacher: studentAgg[id]?.studentsWrongByTeacher || {} };
     })
     .sort((a, b) => a.minDiff - b.minDiff);  // hardest first
 
@@ -333,38 +336,12 @@ function buildReport(teachers) {
     });
   }
 
-  // Quality flags: items where ANY discrimination < 0.20
-  const flagItems = Object.entries(itemAgg)
-    .filter(([id, agg]) => agg.discriminations.length > 0 && Math.min(...agg.discriminations) < 0.20)
-    .map(([id, agg]) => {
-      const minDisc = Math.min(...agg.discriminations);
-      const maxDisc = Math.max(...agg.discriminations);
-      const pct = agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0;
-      return { id, minDisc, maxDisc, pct };
-    });
 
-  let flagBlock = `ITEM QUALITY FLAGS (copy these exactly):\n`;
-  if (flagItems.length === 0) {
-    flagBlock += `  None\n`;
-  } else {
-    flagItems.forEach(f => {
-      const discStr = f.minDisc === f.maxDisc ? f.minDisc.toFixed(2) : `${f.minDisc.toFixed(2)}–${f.maxDisc.toFixed(2)}`;
-      flagBlock += `  Item ${f.id}: discrimination=${discStr}, ${f.pct}% correct\n`;
-    });
-  }
-
-  // Discrimination explanation helper
-  const discExplain = (minDisc, pct) => {
-    if (minDisc === 0) return `${pct}% of students answered correctly, leaving no variance to differentiate high from low performers.`;
-    if (minDisc < 0.10) return `Very weak differentiation — likely because ${pct}% correct leaves little variance between high and low performers.`;
-    return `Minimal differentiation between high and low performers at ${pct}% correct.`;
-  };
 
   return {
     overallMean, overallMedian, overallHigh, overallLow,
     totalStudents, totalProficient, proficiencyPct, gradeDist,
-    strengthItems, priorityItems, flagItems,
-    discExplain
+    strengthItems, priorityItems
   };
 }
 
@@ -820,7 +797,7 @@ function App() {
                 </div>
               )}
               {report && (() => {
-                const { overallMean, overallMedian, overallHigh, overallLow, totalStudents, totalProficient, proficiencyPct, gradeDist, strengthItems, priorityItems, flagItems, discExplain } = report;
+                const { overallMean, overallMedian, overallHigh, overallLow, totalStudents, totalProficient, proficiencyPct, gradeDist, strengthItems, priorityItems } = report;
                 const notProficient = totalStudents - totalProficient;
                 const GRADE_COLORS = { A:"#16a34a", B:"#65a30d", C:"#d97706", D:"#ea580c", F:"#dc2626" };
                 const GRADE_BGS = { A:"#dcfce7", B:"#f0fdf4", C:"#fef9c3", D:"#fff7ed", F:"#fee2e2" };
@@ -840,7 +817,7 @@ function App() {
                   totalStudents > 0 ? `Students: ${totalStudents} total  |  Proficient (≥70%): ${totalProficient} (${proficiencyPct}%)  |  Not proficient: ${notProficient}` : "",
                   totalStudents > 0 ? `Grade distribution: A: ${gradeDist.A}  B: ${gradeDist.B}  C: ${gradeDist.C}  D: ${gradeDist.D}  F: ${gradeDist.F}` : "",
                   "",
-                  "── ITEMS OF STRENGTH ────────────────────",
+                  "── ITEMS WITH HIGH MASTERY ─────────────",
                   ...(strengthItems.length === 0 ? ["None"] : strengthItems.map(s => {
                     const d = s.minDiff === s.maxDiff ? s.minDiff.toFixed(2) : `${s.minDiff.toFixed(2)}–${s.maxDiff.toFixed(2)}`;
                     return `Item ${s.id}: ${s.finalPct}% correct (difficulty ${d})`;
@@ -853,11 +830,7 @@ function App() {
                     return `[${p.flag}] Item ${p.id}: ${p.finalPct}% correct, difficulty ${d}, discrimination ${dc}, ${p.finalIncorrect} incorrect${p.topWrong ? `, top wrong: ${p.topWrong}` : ""}`;
                   })),
                   "",
-                  "── ITEM QUALITY FLAGS ───────────────────",
-                  ...(flagItems.length === 0 ? ["None"] : flagItems.map(f => {
-                    const d = f.minDisc === f.maxDisc ? f.minDisc.toFixed(2) : `${f.minDisc.toFixed(2)}–${f.maxDisc.toFixed(2)}`;
-                    return `Item ${f.id}: discrimination=${d}, ${f.pct}% correct. ${discExplain(f.minDisc, f.pct)}`;
-                  })),
+
                 ].join("\n");
 
                 return (
@@ -945,8 +918,8 @@ function App() {
                         ))}
                       </div>
 
-                      {/* ── ITEMS OF STRENGTH ── */}
-                      <h2 style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "0 0 0.5rem", fontFamily: "'Playfair Display', serif" }}>✅ Items of Strength</h2>
+                      {/* ── ITEMS WITH HIGH MASTERY ── */}
+                      <h2 style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "0 0 0.5rem", fontFamily: "'Playfair Display', serif" }}>✅ Items with High Mastery</h2>
                       <div style={{ marginBottom: "1.5rem" }}>
                         {strengthItems.length === 0
                           ? <p style={{ color: "#6b7280", fontSize: "0.875rem", margin: 0 }}>No items had difficulty ≥ 0.80 across all sections.</p>
@@ -1008,59 +981,41 @@ function App() {
                                         Top wrong answer: <em style={{ color: "#1e3a8a" }}>{p.topWrong}</em>
                                       </div>
                                     )}
-                                    {p.studentsWrong && p.studentsWrong.length > 0 && (
-                                      <div style={{ marginTop: "0.5rem" }}>
-                                        <button
-                                          onClick={() => toggleStudentList(p.id)}
-                                          style={{ background: "none", border: `1px solid ${fs.color}60`, borderRadius: 6, padding: "0.25rem 0.65rem", fontSize: "0.75rem", fontWeight: 600, color: fs.color, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "0.35rem" }}>
-                                          <span>{openStudentLists[p.id] ? "▲" : "▼"}</span>
-                                          <span>{p.studentsWrong.length} student{p.studentsWrong.length !== 1 ? "s" : ""} answered incorrectly</span>
-                                        </button>
-                                        {openStudentLists[p.id] && (
-                                          <div style={{ marginTop: "0.4rem", background: "white", border: `1px solid ${fs.color}30`, borderRadius: 6, padding: "0.5rem 0.75rem", display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
-                                            {p.studentsWrong.map(name => (
-                                              <span key={name} style={{ background: fs.bg, color: fs.color, borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.75rem", fontWeight: 500 }}>
-                                                {name}
-                                              </span>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
+                                    {p.studentsWrongByTeacher && Object.keys(p.studentsWrongByTeacher).length > 0 && (() => {
+                                      const totalWrong = Object.values(p.studentsWrongByTeacher).reduce((a, b) => a + b.length, 0);
+                                      return (
+                                        <div style={{ marginTop: "0.5rem" }}>
+                                          <button
+                                            onClick={() => toggleStudentList(p.id)}
+                                            style={{ background: "none", border: `1px solid ${fs.color}60`, borderRadius: 6, padding: "0.25rem 0.65rem", fontSize: "0.75rem", fontWeight: 600, color: fs.color, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                                            <span>{openStudentLists[p.id] ? "▲" : "▼"}</span>
+                                            <span>{totalWrong} student{totalWrong !== 1 ? "s" : ""} answered incorrectly</span>
+                                          </button>
+                                          {openStudentLists[p.id] && (
+                                            <div style={{ marginTop: "0.4rem", background: "white", border: `1px solid ${fs.color}30`, borderRadius: 6, padding: "0.6rem 0.75rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                                              {Object.entries(p.studentsWrongByTeacher).sort((a,b) => a[0].localeCompare(b[0])).map(([teacherLabel, names]) => (
+                                                <div key={teacherLabel}>
+                                                  <div style={{ fontSize: "0.7rem", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.3rem" }}>
+                                                    {teacherLabel} · {names.length} student{names.length !== 1 ? "s" : ""}
+                                                  </div>
+                                                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
+                                                    {[...names].sort().map(name => (
+                                                      <span key={name} style={{ background: fs.bg, color: fs.color, borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.75rem", fontWeight: 500 }}>
+                                                        {name}
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                 );
                               })}
                             </div>
-                        }
-                      </div>
-
-                      {/* ── ITEM QUALITY FLAGS ── */}
-                      <h2 style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "0 0 0.5rem", fontFamily: "'Playfair Display', serif" }}>🔍 Item Quality Flags</h2>
-                      <div>
-                        {flagItems.length === 0
-                          ? <p style={{ color: "#6b7280", fontSize: "0.875rem", margin: 0 }}>No items with discrimination below 0.20.</p>
-                          : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
-                              <thead>
-                                <tr style={{ background: "#f8fafc" }}>
-                                  {["Item ID", "Discrimination", "% Correct", "Note"].map(h => (
-                                    <th key={h} style={{ padding: "0.45rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "2px solid #e5e7eb", fontSize: "0.78rem" }}>{h}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {flagItems.map((f, i) => {
-                                  const d = f.minDisc === f.maxDisc ? f.minDisc.toFixed(2) : `${f.minDisc.toFixed(2)}–${f.maxDisc.toFixed(2)}`;
-                                  return (
-                                    <tr key={f.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
-                                      <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{f.id}</td>
-                                      <td style={{ padding: "0.45rem 0.75rem", fontWeight: 700, color: "#d97706" }}>{d}</td>
-                                      <td style={{ padding: "0.45rem 0.75rem" }}>{f.pct}%</td>
-                                      <td style={{ padding: "0.45rem 0.75rem", color: "#4b5563", fontSize: "0.8rem" }}>{discExplain(f.minDisc, f.pct)}</td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
                         }
                       </div>
 
