@@ -196,11 +196,13 @@ function buildReport(teachers) {
       const total = correct + incorrect;
       const diff = parseFloat(itm.ItemDifficulty);
       const disc = parseFloat(itm.DiscriminationIndex);
-      if (!itemAgg[id]) itemAgg[id] = { correct:0, total:0, difficulties:[], discriminations:[], topDistractor:"", topDistractorCount:0 };
+      if (!itemAgg[id]) itemAgg[id] = { correct:0, total:0, difficulties:[], discriminations:[], citcs:[], topDistractor:"", topDistractorCount:0 };
       itemAgg[id].correct += correct;
       itemAgg[id].total += total;
       if (!isNaN(diff)) itemAgg[id].difficulties.push(diff);
       if (!isNaN(disc)) itemAgg[id].discriminations.push(disc);
+      const citc = parseFloat(itm.CorrectedItemTotalCorrelation);
+      if (!isNaN(citc)) itemAgg[id].citcs.push(citc);
       // Take distractor from item analysis AnswerFrequencies
       try {
         const af = JSON.parse(itm.AnswerFrequencies);
@@ -291,14 +293,16 @@ function buildReport(teachers) {
     });
   }
 
-  // Priority: items where ANY difficulty < 0.55 OR (difficulty < 0.80 AND ANY discrimination < 0.20)
-  // The "combined" flag marks items that are both moderately hard and low-discriminating
+  // Priority: items where ANY difficulty < 0.55 OR (difficulty < 0.80 AND low disc/CITC)
+  // Low discrimination: disc < 0.20 OR CITC < 0.30
   const priorityItems = Object.entries(itemAgg)
     .filter(([id, agg]) => {
-      if (!agg.difficulties.length || !agg.discriminations.length) return false;
+      if (!agg.difficulties.length) return false;
       const lowDiff = Math.min(...agg.difficulties) < 0.55;
-      const combined = Math.min(...agg.difficulties) < 0.80 && Math.min(...agg.discriminations) < 0.20;
-      return lowDiff || combined;
+      const lowDisc = agg.discriminations.length > 0 && Math.min(...agg.discriminations) < 0.20;
+      const lowCITC = agg.citcs.length > 0 && Math.min(...agg.citcs) < 0.30;
+      const combined = Math.min(...agg.difficulties) < 0.80 && (lowDisc || lowCITC);
+      return lowDiff || combined || lowDisc || lowCITC;
     })
     .map(([id, agg]) => {
       const sa = studentAgg[id];
@@ -306,11 +310,22 @@ function buildReport(teachers) {
       const finalIncorrect = sa ? (sa.attempted - sa.correct) : (agg.total - agg.correct);
       const minDiff = Math.min(...agg.difficulties);
       const maxDiff = Math.max(...agg.difficulties);
-      const minDisc = Math.min(...agg.discriminations);
-      const maxDisc = Math.max(...agg.discriminations);
+      const minDisc = agg.discriminations.length > 0 ? Math.min(...agg.discriminations) : null;
+      const maxDisc = agg.discriminations.length > 0 ? Math.max(...agg.discriminations) : null;
+      const minCITC = agg.citcs.length > 0 ? Math.min(...agg.citcs) : null;
+      const maxCITC = agg.citcs.length > 0 ? Math.max(...agg.citcs) : null;
       const lowDiff = minDiff < 0.55;
-      const lowDisc = minDisc < 0.20;
-      const flag = lowDiff && lowDisc ? "LOW DIFFICULTY + LOW DISCRIMINATION" : lowDiff ? "LOW DIFFICULTY" : "LOW DISCRIMINATION";
+      const lowDisc = minDisc !== null && minDisc < 0.20;
+      const lowCITC = minCITC !== null && minCITC < 0.30;
+      const lowQuality = lowDisc || lowCITC;
+      let flag;
+      if (lowDiff && lowDisc && lowCITC) flag = "LOW DIFFICULTY + LOW DISCRIMINATION + LOW CITC";
+      else if (lowDiff && lowDisc) flag = "LOW DIFFICULTY + LOW DISCRIMINATION";
+      else if (lowDiff && lowCITC) flag = "LOW DIFFICULTY + LOW CITC";
+      else if (lowDiff) flag = "LOW DIFFICULTY";
+      else if (lowDisc && lowCITC) flag = "LOW DISCRIMINATION + LOW CITC";
+      else if (lowDisc) flag = "LOW DISCRIMINATION";
+      else flag = "LOW CITC";
       let topWrong = "";
       if (sa) {
         const top = Object.entries(sa.wrongTally).sort((a,b) => b[1]-a[1])[0];
@@ -318,7 +333,7 @@ function buildReport(teachers) {
       } else if (agg.topDistractor) {
         topWrong = `"${agg.topDistractor}" (n=${agg.topDistractorCount})`;
       }
-      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, topWrong, flag,
+      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, minCITC, maxCITC, topWrong, flag,
         studentsWrongByTeacher: studentAgg[id]?.studentsWrongByTeacher || {} };
     })
     .sort((a, b) => a.minDiff - b.minDiff);  // hardest first
@@ -648,7 +663,7 @@ function App() {
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
                       <thead>
                         <tr style={{ background: "#f8fafc" }}>
-                          {["#", ...(teachers.length > 1 ? ["Teacher"] : []), "Item ID", "Difficulty", "Level", "✓", "✗", "% Correct", "Discrimination", "Quality"].map(h => (
+                          {["#", ...(teachers.length > 1 ? ["Teacher"] : []), "Item ID", "Difficulty", "Level", "✓", "✗", "% Correct", "Discrimination", "CITC", "Quality"].map(h => (
                             <th key={h} style={{ padding: "0.5rem 0.65rem", textAlign: "left", color: "#374151", fontWeight: 700, borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap", fontSize: "0.75rem" }}>{h}</th>
                           ))}
                         </tr>
@@ -661,6 +676,8 @@ function App() {
                           const incorrect = parseInt(item.Incorrect) || 0;
                           const total = correct + incorrect;
                           const pct = total > 0 ? Math.round((correct / total) * 100) : 0;
+                          const citcVal = parseFloat(item.CorrectedItemTotalCorrelation);
+                          const citcColor = isNaN(citcVal) ? "#9ca3af" : citcVal >= 0.30 ? "#16a34a" : citcVal >= 0.20 ? "#d97706" : "#dc2626";
                           return (
                             <tr key={i} style={{ borderBottom: "1px solid #f3f4f6", background: i % 2 === 0 ? "white" : "#fafafa" }}>
                               <td style={{ padding: "0.45rem 0.65rem", color: "#9ca3af" }}>{i + 1}</td>
@@ -678,7 +695,8 @@ function App() {
                                   <span style={{ fontWeight: 600 }}>{pct}%</span>
                                 </div>
                               </td>
-                              <td style={{ padding: "0.45rem 0.65rem", fontWeight: 600 }}>{parseFloat(item.DiscriminationIndex).toFixed(2)}</td>
+                              <td style={{ padding: "0.45rem 0.65rem", fontWeight: 600 }}>{isNaN(parseFloat(item.DiscriminationIndex)) ? "N/A" : parseFloat(item.DiscriminationIndex).toFixed(2)}</td>
+                              <td style={{ padding: "0.45rem 0.65rem", fontWeight: 700, color: citcColor }}>{isNaN(citcVal) ? "N/A" : citcVal.toFixed(2)}</td>
                               <td style={{ padding: "0.45rem 0.65rem" }}><span style={{ background: disc.color + "18", color: disc.color, padding: "0.1rem 0.4rem", borderRadius: 20, fontSize: "0.7rem", fontWeight: 700 }}>{disc.label}</span></td>
                             </tr>
                           );
@@ -804,7 +822,11 @@ function App() {
                 const FLAG_STYLES = {
                   "LOW DIFFICULTY": { color:"#dc2626", bg:"#fee2e2" },
                   "LOW DISCRIMINATION": { color:"#d97706", bg:"#fef9c3" },
-                  "LOW DIFFICULTY + LOW DISCRIMINATION": { color:"#7c2d12", bg:"#fff7ed" },
+                  "LOW CITC": { color:"#7c3aed", bg:"#f5f3ff" },
+                  "LOW DIFFICULTY + LOW DISCRIMINATION": { color:"#b45309", bg:"#fff7ed" },
+                  "LOW DIFFICULTY + LOW CITC": { color:"#b91c1c", bg:"#fef2f2" },
+                  "LOW DISCRIMINATION + LOW CITC": { color:"#6d28d9", bg:"#ede9fe" },
+                  "LOW DIFFICULTY + LOW DISCRIMINATION + LOW CITC": { color:"#7c2d12", bg:"#fef2f2" },
                 };
 
                 // Build printable text for copy button
@@ -861,9 +883,9 @@ function App() {
                         <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#1e3a8a", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>Priority Item Flag Guide</div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                           {[
-                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered correctly."],
-                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Difficulty is below 0.80 and discrimination is below 0.20 — the item is not effectively distinguishing between students who have mastered the content and those who haven't."],
-                            ["LOW DIFFICULTY + LOW DISCRIMINATION", "#7c2d12", "#fff7ed", "Both conditions are present — students are struggling and the item is not providing useful diagnostic information."],
+                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered correctly across all sections."],
+                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Discrimination Index is below 0.20 — the item is not effectively separating high from low performers."],
+                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Corrected Item-Total Correlation is below 0.30 — the item is not measuring the same construct as the rest of the quiz."],
                           ].map(([label, color, bg, desc]) => (
                             <div key={label} style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
                               <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", marginTop: "0.15rem", flexShrink: 0 }}>{label}</span>
@@ -975,6 +997,7 @@ function App() {
                                       <span><strong>{p.finalIncorrect}</strong> students incorrect</span>
                                       <span>Difficulty: <strong>{d}</strong></span>
                                       <span>Discrimination: <strong>{dc}</strong></span>
+                                      {p.minCITC !== null && <span>CITC: <strong>{p.minCITC === p.maxCITC ? p.minCITC.toFixed(2) : `${p.minCITC.toFixed(2)}–${p.maxCITC.toFixed(2)}`}</strong></span>}
                                     </div>
                                     {p.topWrong && (
                                       <div style={{ marginTop: "0.4rem", fontSize: "0.8rem", color: "#4b5563" }}>
