@@ -341,19 +341,28 @@ function buildReport(teachers) {
 
   // ── Pre-compute strength and priority lists ─────────────────────────────────
 
-  // Strength: items where pooled difficulty >= 0.80 (or all per-section values if no pooled data)
+  // Strength: difficulty >= 0.80 AND quality metrics are healthy or borderline
+  // Weak quality items (disc < 0.20 OR CITC < 0.30) at high difficulty go to Potential Review instead
   const strengthItems = Object.entries(itemAgg)
     .filter(([id, agg]) => {
       if (!agg.difficulties.length) return false;
       const p = pooled[id];
       const diff = p ? p.difficulty : Math.min(...agg.difficulties);
-      return diff >= 0.80;
+      if (diff < 0.80) return false;
+      // Exclude items where quality metrics are weak (those go to Potential Review)
+      const disc = p ? p.discrimination : null;
+      const citc = p ? p.citc : null;
+      const weakDisc = disc !== null && disc < 0.20;
+      const weakCITC = citc !== null && citc < 0.30;
+      return !weakDisc && !weakCITC;
     })
     .map(([id, agg]) => {
       const p = pooled[id];
       const finalPct = p ? Math.round(p.difficulty * 100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
       const combinedDiff = p ? p.difficulty : Math.min(...agg.difficulties);
-      return { id, finalPct, combinedDiff };
+      const combinedDisc = p ? p.discrimination : null;
+      const combinedCITC = p ? p.citc : null;
+      return { id, finalPct, combinedDiff, combinedDisc, combinedCITC };
     })
     .sort((a, b) => a.combinedDiff - b.combinedDiff)  // closest to 0.80 first
     .slice(0, 5);
@@ -1028,26 +1037,32 @@ function App() {
                           : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                               <thead>
                                 <tr style={{ background: "#f8fafc" }}>
-                                  {["Item ID", "% Correct", "Difficulty Range"].map(h => (
+                                  {["Item ID", "% Correct", "Difficulty", "Discrimination", "CITC"].map(h => (
                                     <th key={h} style={{ padding: "0.45rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "2px solid #e5e7eb", fontSize: "0.78rem" }}>{h}</th>
                                   ))}
                                 </tr>
                               </thead>
                               <tbody>
-                                {strengthItems.map((s, i) => (
-                                  <tr key={s.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
-                                    <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{s.id}</td>
-                                    <td style={{ padding: "0.45rem 0.75rem" }}>
-                                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                                        <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
-                                          <div style={{ width: s.finalPct+"%", height: "100%", background: "#16a34a", borderRadius: 3 }} />
+                                {strengthItems.map((s, i) => {
+                                  const discColor = s.combinedDisc === null ? "#9ca3af" : s.combinedDisc >= 0.30 ? "#16a34a" : s.combinedDisc >= 0.20 ? "#d97706" : "#dc2626";
+                                  const citcColor = s.combinedCITC === null ? "#9ca3af" : s.combinedCITC >= 0.40 ? "#16a34a" : s.combinedCITC >= 0.30 ? "#d97706" : "#7c3aed";
+                                  return (
+                                    <tr key={s.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
+                                      <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{s.id}</td>
+                                      <td style={{ padding: "0.45rem 0.75rem" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                          <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                            <div style={{ width: s.finalPct+"%", height: "100%", background: "#16a34a", borderRadius: 3 }} />
+                                          </div>
+                                          <span style={{ fontWeight: 700, color: "#16a34a" }}>{s.finalPct}%</span>
                                         </div>
-                                        <span style={{ fontWeight: 700, color: "#16a34a" }}>{s.finalPct}%</span>
-                                      </div>
-                                    </td>
-                                    <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{s.combinedDiff.toFixed(2)}</td>
-                                  </tr>
-                                ))}
+                                      </td>
+                                      <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{s.combinedDiff.toFixed(2)}</td>
+                                      <td style={{ padding: "0.45rem 0.75rem", fontWeight: 600, color: discColor }}>{s.combinedDisc !== null ? s.combinedDisc.toFixed(2) : "N/A"}</td>
+                                      <td style={{ padding: "0.45rem 0.75rem", fontWeight: 600, color: citcColor }}>{s.combinedCITC !== null ? s.combinedCITC.toFixed(2) : "N/A"}</td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                         }
