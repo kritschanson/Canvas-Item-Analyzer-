@@ -216,18 +216,30 @@ function buildReport(teachers) {
   });
 
   // 3. Aggregate wrong answers from student analysis files (more accurate than item analysis)
-  // itemId -> { attempted, correct, wrongTally{} }
+  // itemId -> { attempted, correct, wrongTally{}, studentsWrong[] }
   const studentAgg = {};
   teachers.filter(t => t.student).forEach(t => {
     t.student.itemStats.forEach(s => {
       const id = s.itemId;
       if (!id) return;
-      if (!studentAgg[id]) studentAgg[id] = { attempted:0, correct:0, wrongTally:{} };
+      if (!studentAgg[id]) studentAgg[id] = { attempted:0, correct:0, wrongTally:{}, studentsWrong:[] };
       studentAgg[id].attempted += s.attempted;
       studentAgg[id].correct += s.correct;
       // Merge the full wrongTally from each section
       Object.entries(s.wrongTally || {}).forEach(([ans, cnt]) => {
         studentAgg[id].wrongTally[ans] = (studentAgg[id].wrongTally[ans] || 0) + cnt;
+      });
+    });
+    // Track which students got each item wrong
+    t.student.students.forEach(stu => {
+      t.student.itemStats.forEach(s => {
+        const id = s.itemId;
+        if (!id || !studentAgg[id]) return;
+        const idx = t.student.itemStats.indexOf(s);
+        const it = stu.items[idx];
+        if (it && it.status !== "Not Attempted" && it.earned === 0) {
+          studentAgg[id].studentsWrong.push(stu.name);
+        }
       });
     });
   });
@@ -303,7 +315,8 @@ function buildReport(teachers) {
       } else if (agg.topDistractor) {
         topWrong = `"${agg.topDistractor}" (n=${agg.topDistractorCount})`;
       }
-      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, topWrong, flag };
+      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, topWrong, flag,
+        studentsWrong: (studentAgg[id]?.studentsWrong || []).sort() };
     })
     .sort((a, b) => a.minDiff - b.minDiff);  // hardest first
 
@@ -455,6 +468,8 @@ function App() {
   const [pendingLabel, setPendingLabel] = useState(null);
   const [itemTableOpen, setItemTableOpen] = useState(true);
   const [studentTableOpen, setStudentTableOpen] = useState(true);
+  const [openStudentLists, setOpenStudentLists] = useState({});
+  const toggleStudentList = (id) => setOpenStudentLists(prev => ({ ...prev, [id]: !prev[id] }));
 
   const processFiles = useCallback(async (fileList, forLabel = null) => {
     setError("");
@@ -991,6 +1006,25 @@ function App() {
                                     {p.topWrong && (
                                       <div style={{ marginTop: "0.4rem", fontSize: "0.8rem", color: "#4b5563" }}>
                                         Top wrong answer: <em style={{ color: "#1e3a8a" }}>{p.topWrong}</em>
+                                      </div>
+                                    )}
+                                    {p.studentsWrong && p.studentsWrong.length > 0 && (
+                                      <div style={{ marginTop: "0.5rem" }}>
+                                        <button
+                                          onClick={() => toggleStudentList(p.id)}
+                                          style={{ background: "none", border: `1px solid ${fs.color}60`, borderRadius: 6, padding: "0.25rem 0.65rem", fontSize: "0.75rem", fontWeight: 600, color: fs.color, cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                                          <span>{openStudentLists[p.id] ? "▲" : "▼"}</span>
+                                          <span>{p.studentsWrong.length} student{p.studentsWrong.length !== 1 ? "s" : ""} answered incorrectly</span>
+                                        </button>
+                                        {openStudentLists[p.id] && (
+                                          <div style={{ marginTop: "0.4rem", background: "white", border: `1px solid ${fs.color}30`, borderRadius: 6, padding: "0.5rem 0.75rem", display: "flex", flexWrap: "wrap", gap: "0.3rem" }}>
+                                            {p.studentsWrong.map(name => (
+                                              <span key={name} style={{ background: fs.bg, color: fs.color, borderRadius: 20, padding: "0.15rem 0.55rem", fontSize: "0.75rem", fontWeight: 500 }}>
+                                                {name}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
                                       </div>
                                     )}
                                   </div>
