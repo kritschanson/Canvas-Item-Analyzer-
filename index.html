@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Canvas PLC Item Analyzer</title>
+  <title>Canvas Quiz Analyzer</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -522,8 +522,8 @@ function App() {
           <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
             <span style={{ fontSize: "1.7rem" }}>📚</span>
             <div>
-              <h1 style={{ margin: 0, color: "white", fontSize: "1.4rem", fontFamily: "'Playfair Display', serif" }}>Canvas PLC Item Analyzer</h1>
-              <p style={{ margin: 0, color: "#bfdbfe", fontSize: "0.78rem" }}>Upload item & student analysis CSVs per teacher · Compare sections · Get AI-powered PLC insights</p>
+              <h1 style={{ margin: 0, color: "white", fontSize: "1.4rem", fontFamily: "'Playfair Display', serif" }}>Canvas Quiz Analyzer</h1>
+              <p style={{ margin: 0, color: "#bfdbfe", fontSize: "0.78rem" }}>Upload item &amp; student analysis CSVs per teacher · Compare sections · Generate your Quiz Report</p>
             </div>
           </div>
           <div style={{ display: "flex", gap: "0.4rem", marginTop: "1rem" }}>
@@ -561,10 +561,10 @@ function App() {
                 <div style={{ fontSize: "2.5rem", marginBottom: "0.6rem" }}>📂</div>
                 <p style={{ margin: "0 0 0.35rem", fontSize: "1.05rem", fontWeight: 700, color: "#1e3a8a" }}>Drop CSV files here</p>
                 <p style={{ margin: "0 0 0.75rem", color: "#6b7280", fontSize: "0.85rem" }}>
-                  Drop item analysis <em>and/or</em> student analysis files — the tool auto-detects which is which
+                  Drop item &amp; student analysis files — name them <em>Teacher Item.csv</em> and <em>Teacher Student.csv</em>
                 </p>
                 <div style={{ display: "flex", justifyContent: "center", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
-                  {["Smith_item.csv", "Smith_student.csv", "Jones_item.csv", "Jones_student.csv"].map(f => (
+                  {["Smith Item.csv", "Smith Student.csv", "Jones Item.csv", "Jones Student.csv"].map(f => (
                     <span key={f} style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.2rem 0.6rem", fontSize: "0.75rem", fontWeight: 600 }}>{f}</span>
                   ))}
                 </div>
@@ -604,7 +604,7 @@ function App() {
                   </div>
                 </div>
                 <p style={{ margin: "0.75rem 0 0", fontSize: "0.8rem", color: "#6b7280" }}>
-                  💡 <strong>Naming tip:</strong> Include the teacher name in the filename (e.g. <em>Smith_item_analysis.csv</em> and <em>Smith_student_analysis.csv</em>) — the tool will pair them automatically.
+                  💡 <strong>Naming convention:</strong> Name each file as <em>Teacher Item.csv</em> and <em>Teacher Student.csv</em> (e.g. <em>Smith Item.csv</em> and <em>Smith Student.csv</em>) — the tool will automatically pair them by teacher name.
                 </p>
               </div>
             </div>
@@ -778,7 +778,7 @@ function App() {
               <div style={{ textAlign: "center" }}>
                 <button onClick={generateReport}
                   style={{ background: "linear-gradient(135deg, #1e40af, #3b82f6)", color: "white", border: "none", borderRadius: 10, padding: "0.85rem 2.5rem", fontSize: "1rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 4px 18px rgba(30,64,175,0.35)" }}>
-                  📊 Generate PLC Report
+                  📊 Generate Quiz Report
                 </button>
               </div>
             </div>
@@ -790,7 +790,7 @@ function App() {
               {!report && (
                 <div style={{ textAlign: "center", padding: "3rem", color: "#6b7280" }}>
                   <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>📊</div>
-                  <p>Go to the <strong>Data tab</strong> and click <strong>Generate PLC Report</strong>.</p>
+                  <p>Go to the <strong>Data tab</strong> and click <strong>Generate Quiz Report</strong>.</p>
                   <button onClick={() => setActiveTab(teachers.length ? "data" : "upload")} style={{ background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.5rem 1.2rem", fontFamily: "inherit", fontWeight: 600, cursor: "pointer" }}>
                     {teachers.length ? "Go to Data →" : "Upload Files →"}
                   </button>
@@ -809,7 +809,7 @@ function App() {
 
                 // Build printable text for copy button
                 const printText = [
-                  "PLC ANALYSIS REPORT",
+                  "QUIZ REPORT",
                   `${teachers.map(t => t.label).join(" · ")}`,
                   "",
                   "── OVERALL PERFORMANCE ──────────────────",
@@ -841,7 +841,7 @@ function App() {
                       {/* Header */}
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem", paddingBottom: "1rem", borderBottom: "2px solid #e0e7ff" }}>
                         <div>
-                          <h2 style={{ margin: "0 0 0.2rem", color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "1.2rem" }}>PLC Analysis Report</h2>
+                          <h2 style={{ margin: "0 0 0.2rem", color: "#1e3a8a", fontFamily: "'Playfair Display', serif", fontSize: "1.2rem" }}>Quiz Report</h2>
                           <p style={{ margin: 0, color: "#6b7280", fontSize: "0.75rem" }}>{teachers.map(t => t.label).join(" · ")}</p>
                         </div>
                         <button onClick={() => navigator.clipboard?.writeText(printText)}
