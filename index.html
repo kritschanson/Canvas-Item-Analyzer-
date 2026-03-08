@@ -168,10 +168,82 @@ function classifyDiscrimination(d) {
   return { label: "Poor", color: "#dc2626" };
 }
 
+// ─── Pooled Item Statistics ──────────────────────────────────────────────────
+
+function computePooledStats(teachers) {
+  // Pool all students across all sections
+  const allStudents = [];
+  teachers.filter(t => t.student).forEach(t => {
+    t.student.students.forEach(stu => {
+      // Build item map: { itemId -> binary score (1/0) }
+      const itemMap = {};
+      t.student.itemStats.forEach((s, idx) => {
+        const it = stu.items[idx];
+        if (it && it.status !== "Not Attempted" && it.earned !== null) {
+          itemMap[s.itemId] = it.earned > 0 ? 1 : 0;
+        }
+      });
+      if (Object.keys(itemMap).length > 0) {
+        allStudents.push({
+          overall: stu.overall,
+          possible: stu.possible,
+          items: itemMap
+        });
+      }
+    });
+  });
+
+  if (!allStudents.length) return {};
+
+  // Pearson correlation helper
+  const pearson = (x, y) => {
+    const n = x.length;
+    if (n < 3) return null;
+    const mx = x.reduce((a,b)=>a+b,0)/n;
+    const my = y.reduce((a,b)=>a+b,0)/n;
+    const num = x.reduce((s,xi,i) => s + (xi-mx)*(y[i]-my), 0);
+    const den = Math.sqrt(x.reduce((s,xi)=>s+(xi-mx)**2,0) * y.reduce((s,yi)=>s+(yi-my)**2,0));
+    return den > 0 ? num/den : null;
+  };
+
+  // Get all unique item IDs
+  const allItemIds = new Set();
+  allStudents.forEach(s => Object.keys(s.items).forEach(id => allItemIds.add(id)));
+
+  const pooled = {};
+  allItemIds.forEach(itemId => {
+    const relevant = allStudents.filter(s => itemId in s.items);
+    const n = relevant.length;
+    if (n === 0) return;
+
+    const scores = relevant.map(s => s.items[itemId]);
+    const difficulty = scores.reduce((a,b)=>a+b,0) / n;
+
+    // Discrimination: top vs bottom 27%
+    const k = Math.max(1, Math.round(n * 0.27));
+    const sorted = [...relevant].sort((a,b) => a.overall - b.overall);
+    const bottomPass = sorted.slice(0, k).filter(s => s.items[itemId] === 1).length / k;
+    const topPass = sorted.slice(-k).filter(s => s.items[itemId] === 1).length / k;
+    const discrimination = topPass - bottomPass;
+
+    // CITC: correlate item score with total score (as proportion)
+    const itemScores = relevant.map(s => s.items[itemId]);
+    const totalPcts = relevant.map(s => s.possible > 0 ? s.overall / s.possible : 0);
+    const citc = pearson(itemScores, totalPcts);
+
+    pooled[itemId] = { n, difficulty, discrimination, citc, smallSample: n < 25 };
+  });
+
+  return pooled;
+}
+
 // ─── Report Builder (no API needed) ────────────────────────────────────────
 
 function buildReport(teachers) {
   // ── Pre-aggregate everything before sending to AI ──────────────────────────
+
+  // 0. Compute pooled discrimination and CITC from all student data
+  const pooled = computePooledStats(teachers);
 
   // 1. Overall quiz stats (from item analysis summaries)
   const itemSummaries = teachers.filter(t => t.item).map(t => t.item.summary);
@@ -269,18 +341,21 @@ function buildReport(teachers) {
 
   // ── Pre-compute strength and priority lists ─────────────────────────────────
 
-  // Strength: items where ALL difficulty values are >= 0.80
-  // Use studentAgg pct where available, else itemAgg pct
+  // Strength: items where pooled difficulty >= 0.80 (or all per-section values if no pooled data)
   const strengthItems = Object.entries(itemAgg)
-    .filter(([id, agg]) => agg.difficulties.length > 0 && Math.min(...agg.difficulties) >= 0.80)
-    .map(([id, agg]) => {
-      const sa = studentAgg[id];
-      const finalPct = sa && sa.attempted > 0 ? Math.round((sa.correct/sa.attempted)*100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
-      const minDiff = Math.min(...agg.difficulties).toFixed(2);
-      const maxDiff = Math.max(...agg.difficulties).toFixed(2);
-      return { id, finalPct, minDiff: parseFloat(minDiff), maxDiff: parseFloat(maxDiff) };
+    .filter(([id, agg]) => {
+      if (!agg.difficulties.length) return false;
+      const p = pooled[id];
+      const diff = p ? p.difficulty : Math.min(...agg.difficulties);
+      return diff >= 0.80;
     })
-    .sort((a, b) => a.minDiff - b.minDiff)  // closest to 0.80 first
+    .map(([id, agg]) => {
+      const p = pooled[id];
+      const finalPct = p ? Math.round(p.difficulty * 100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
+      const combinedDiff = p ? p.difficulty : Math.min(...agg.difficulties);
+      return { id, finalPct, combinedDiff };
+    })
+    .sort((a, b) => a.combinedDiff - b.combinedDiff)  // closest to 0.80 first
     .slice(0, 5);
 
   let strengthBlock = `ITEMS WITH HIGH MASTERY (all sections ≥ 0.80 difficulty — copy these exactly):\n`;
@@ -288,36 +363,40 @@ function buildReport(teachers) {
     strengthBlock += `  None — no items had all sections at difficulty ≥ 0.80\n`;
   } else {
     strengthItems.forEach(s => {
-      const diffStr = s.minDiff === s.maxDiff ? s.minDiff.toFixed(2) : `${s.minDiff.toFixed(2)}–${s.maxDiff.toFixed(2)}`;
-      strengthBlock += `  Item ${s.id}: ${s.finalPct}% correct (difficulty ${diffStr})\n`;
+      strengthBlock += `  Item ${s.id}: ${s.finalPct}% correct (difficulty ${s.combinedDiff.toFixed(2)})\n`;
     });
   }
 
-  // Priority: items where ANY difficulty < 0.55 OR (difficulty < 0.80 AND low disc/CITC)
-  // Low discrimination: disc < 0.20 OR CITC < 0.30
-  const priorityItems = Object.entries(itemAgg)
+  // Priority: use pooled stats where available, fall back to itemAgg ranges
+  // Flags based on pooled values (more reliable); small sample items get a warning
+  // Build all flagged items, then split into priority vs review
+  const allFlaggedItems = Object.entries(itemAgg)
     .filter(([id, agg]) => {
       if (!agg.difficulties.length) return false;
-      const lowDiff = Math.min(...agg.difficulties) < 0.55;
-      const lowDisc = agg.discriminations.length > 0 && Math.min(...agg.discriminations) < 0.20;
-      const lowCITC = agg.citcs.length > 0 && Math.min(...agg.citcs) < 0.30;
-      const combined = Math.min(...agg.difficulties) < 0.80 && (lowDisc || lowCITC);
+      const p = pooled[id];
+      const diff = p ? p.difficulty : Math.min(...agg.difficulties);
+      const disc = p ? p.discrimination : (agg.discriminations.length > 0 ? Math.min(...agg.discriminations) : null);
+      const citc = p ? p.citc : (agg.citcs.length > 0 ? Math.min(...agg.citcs) : null);
+      const lowDiff = diff < 0.55;
+      const lowDisc = disc !== null && disc < 0.20;
+      const lowCITC = citc !== null && citc < 0.30;
+      const combined = diff < 0.80 && (lowDisc || lowCITC);
       return lowDiff || combined || lowDisc || lowCITC;
     })
     .map(([id, agg]) => {
       const sa = studentAgg[id];
-      const finalPct = sa && sa.attempted > 0 ? Math.round((sa.correct/sa.attempted)*100) : (agg.total > 0 ? Math.round((agg.correct/agg.total)*100) : 0);
+      const p = pooled[id];
+      const combinedDiff = p ? p.difficulty : (agg.total > 0 ? agg.correct/agg.total : 0);
+      const combinedDisc = p ? p.discrimination : null;
+      const combinedCITC = p ? p.citc : null;
+      const combinedN = p ? p.n : (sa ? sa.attempted : agg.total);
+      const smallSample = p ? p.smallSample : combinedN < 25;
+      const finalPct = Math.round(combinedDiff * 100);
       const finalIncorrect = sa ? (sa.attempted - sa.correct) : (agg.total - agg.correct);
-      const minDiff = Math.min(...agg.difficulties);
-      const maxDiff = Math.max(...agg.difficulties);
-      const minDisc = agg.discriminations.length > 0 ? Math.min(...agg.discriminations) : null;
-      const maxDisc = agg.discriminations.length > 0 ? Math.max(...agg.discriminations) : null;
-      const minCITC = agg.citcs.length > 0 ? Math.min(...agg.citcs) : null;
-      const maxCITC = agg.citcs.length > 0 ? Math.max(...agg.citcs) : null;
-      const lowDiff = minDiff < 0.55;
-      const lowDisc = minDisc !== null && minDisc < 0.20;
-      const lowCITC = minCITC !== null && minCITC < 0.30;
-      const lowQuality = lowDisc || lowCITC;
+      const lowDiff = combinedDiff < 0.55;
+      const lowDisc = combinedDisc !== null && combinedDisc < 0.20;
+      const lowCITC = combinedCITC !== null && combinedCITC < 0.30;
+
       let flag;
       if (lowDiff && lowDisc && lowCITC) flag = "LOW DIFFICULTY + LOW DISCRIMINATION + LOW CITC";
       else if (lowDiff && lowDisc) flag = "LOW DIFFICULTY + LOW DISCRIMINATION";
@@ -326,6 +405,11 @@ function buildReport(teachers) {
       else if (lowDisc && lowCITC) flag = "LOW DISCRIMINATION + LOW CITC";
       else if (lowDisc) flag = "LOW DISCRIMINATION";
       else flag = "LOW CITC";
+
+      // Review-only: difficulty >= 0.80 AND no LOW DIFFICULTY flag
+      // High mastery items with weak quality metrics are likely floor effects, not urgent
+      const isReviewOnly = combinedDiff >= 0.80 && !lowDiff;
+
       let topWrong = "";
       if (sa) {
         const top = Object.entries(sa.wrongTally).sort((a,b) => b[1]-a[1])[0];
@@ -333,30 +417,25 @@ function buildReport(teachers) {
       } else if (agg.topDistractor) {
         topWrong = `"${agg.topDistractor}" (n=${agg.topDistractorCount})`;
       }
-      return { id, finalPct, finalIncorrect, minDiff, maxDiff, minDisc, maxDisc, minCITC, maxCITC, topWrong, flag,
-        studentsWrongByTeacher: studentAgg[id]?.studentsWrongByTeacher || {} };
-    })
-    .sort((a, b) => a.minDiff - b.minDiff);  // hardest first
 
-  let priorityBlock = `PRIORITY ITEMS (copy these exactly, no additions or changes):\n`;
-  if (priorityItems.length === 0) {
-    priorityBlock += `  None\n`;
-  } else {
-    priorityItems.forEach(p => {
-      const diffStr = p.minDiff === p.maxDiff ? p.minDiff.toFixed(2) : `${p.minDiff.toFixed(2)}–${p.maxDiff.toFixed(2)}`;
-      const discStr = p.minDisc === p.maxDisc ? p.minDisc.toFixed(2) : `${p.minDisc.toFixed(2)}–${p.maxDisc.toFixed(2)}`;
-      priorityBlock += `  Item ${p.id} [${p.flag}]: ${p.finalPct}% correct, difficulty ${diffStr}, discrimination ${discStr}, ${p.finalIncorrect} students incorrect`;
-      if (p.topWrong) priorityBlock += `, top wrong answer: ${p.topWrong}`;
-      priorityBlock += `\n`;
+      return {
+        id, finalPct, finalIncorrect, flag, isReviewOnly, smallSample, combinedN,
+        combinedDiff, combinedDisc, combinedCITC, topWrong,
+        minDiff: Math.min(...agg.difficulties), maxDiff: Math.max(...agg.difficulties),
+        studentsWrongByTeacher: studentAgg[id]?.studentsWrongByTeacher || {}
+      };
     });
-  }
 
+  const countFlags = p => (p.flag.match(/LOW DIFFICULTY/) ? 1 : 0) + (p.flag.match(/LOW DISCRIMINATION/) ? 1 : 0) + (p.flag.match(/LOW CITC/) ? 1 : 0);
+  const flagSort = (a, b) => { const d = countFlags(b) - countFlags(a); return d !== 0 ? d : a.combinedDiff - b.combinedDiff; };
 
+  const priorityItems = allFlaggedItems.filter(p => !p.isReviewOnly).sort(flagSort);
+  const reviewItems = allFlaggedItems.filter(p => p.isReviewOnly).sort((a,b) => a.combinedDiff - b.combinedDiff);
 
   return {
     overallMean, overallMedian, overallHigh, overallLow,
     totalStudents, totalProficient, proficiencyPct, gradeDist,
-    strengthItems, priorityItems
+    strengthItems, priorityItems, reviewItems
   };
 }
 
@@ -815,7 +894,7 @@ function App() {
                 </div>
               )}
               {report && (() => {
-                const { overallMean, overallMedian, overallHigh, overallLow, totalStudents, totalProficient, proficiencyPct, gradeDist, strengthItems, priorityItems } = report;
+                const { overallMean, overallMedian, overallHigh, overallLow, totalStudents, totalProficient, proficiencyPct, gradeDist, strengthItems, priorityItems, reviewItems } = report;
                 const notProficient = totalStudents - totalProficient;
                 const GRADE_COLORS = { A:"#16a34a", B:"#65a30d", C:"#d97706", D:"#ea580c", F:"#dc2626" };
                 const GRADE_BGS = { A:"#dcfce7", B:"#f0fdf4", C:"#fef9c3", D:"#fff7ed", F:"#fee2e2" };
@@ -840,17 +919,18 @@ function App() {
                   totalStudents > 0 ? `Grade distribution: A: ${gradeDist.A}  B: ${gradeDist.B}  C: ${gradeDist.C}  D: ${gradeDist.D}  F: ${gradeDist.F}` : "",
                   "",
                   "── ITEMS WITH HIGH MASTERY ─────────────",
-                  ...(strengthItems.length === 0 ? ["None"] : strengthItems.map(s => {
-                    const d = s.minDiff === s.maxDiff ? s.minDiff.toFixed(2) : `${s.minDiff.toFixed(2)}–${s.maxDiff.toFixed(2)}`;
-                    return `Item ${s.id}: ${s.finalPct}% correct (difficulty ${d})`;
-                  })),
+                  ...(strengthItems.length === 0 ? ["None"] : strengthItems.map(s => `Item ${s.id}: ${s.finalPct}% correct (difficulty ${s.combinedDiff.toFixed(2)})`)),
                   "",
                   "── PRIORITY ITEMS ───────────────────────",
                   ...(priorityItems.length === 0 ? ["None"] : priorityItems.map(p => {
-                    const d = p.minDiff === p.maxDiff ? p.minDiff.toFixed(2) : `${p.minDiff.toFixed(2)}–${p.maxDiff.toFixed(2)}`;
-                    const dc = p.minDisc === p.maxDisc ? p.minDisc.toFixed(2) : `${p.minDisc.toFixed(2)}–${p.maxDisc.toFixed(2)}`;
-                    return `[${p.flag}] Item ${p.id}: ${p.finalPct}% correct, difficulty ${d}, discrimination ${dc}, ${p.finalIncorrect} incorrect${p.topWrong ? `, top wrong: ${p.topWrong}` : ""}`;
+                    const discStr = p.combinedDisc !== null ? `, discrimination ${p.combinedDisc.toFixed(2)}` : "";
+                    const citcStr = p.combinedCITC !== null ? `, CITC ${p.combinedCITC.toFixed(2)}` : "";
+                    const sampleStr = p.smallSample ? ` [small sample: ${p.combinedN} students]` : "";
+                    return `[${p.flag}] Item ${p.id}: ${p.finalPct}% correct, difficulty ${p.combinedDiff.toFixed(2)}${discStr}${citcStr}, ${p.finalIncorrect} incorrect${sampleStr}${p.topWrong ? `, top wrong: ${p.topWrong}` : ""}`;
                   })),
+                  "",
+                  "── ITEMS FOR POTENTIAL REVIEW ───────────",
+                  ...(reviewItems.length === 0 ? ["None"] : reviewItems.map(p => `Item ${p.id}: ${p.finalPct}% correct, difficulty ${p.combinedDiff.toFixed(2)}${p.combinedDisc !== null ? `, discrimination ${p.combinedDisc.toFixed(2)}` : ""} — high mastery but low discrimination (likely floor effect)`)),
                   "",
 
                 ].join("\n");
@@ -883,9 +963,9 @@ function App() {
                         <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#1e3a8a", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>Priority Item Flag Guide</div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                           {[
-                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered correctly across all sections."],
-                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Discrimination Index is below 0.20 — the item is not effectively separating high from low performers."],
-                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Corrected Item-Total Correlation is below 0.30 — the item is not measuring the same construct as the rest of the quiz."],
+                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered this item correctly. Most students struggled with it."],
+                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Students who scored high overall and students who scored low overall answered this item at about the same rate. It didn\'t help tell the difference between who knows the content and who doesn\'t. Often appears on very easy items — not always alarming, but the item isn\'t doing much diagnostic work."],
+                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Students who did well on the quiz overall did not reliably get this item right. Getting it right or wrong didn\'t predict overall performance. The item may be testing a different skill than the rest of the quiz — worth examining whether it aligns with the learning target."],
                           ].map(([label, color, bg, desc]) => (
                             <div key={label} style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
                               <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", marginTop: "0.15rem", flexShrink: 0 }}>{label}</span>
@@ -954,23 +1034,20 @@ function App() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {strengthItems.map((s, i) => {
-                                  const d = s.minDiff === s.maxDiff ? s.minDiff.toFixed(2) : `${s.minDiff.toFixed(2)}–${s.maxDiff.toFixed(2)}`;
-                                  return (
-                                    <tr key={s.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
-                                      <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{s.id}</td>
-                                      <td style={{ padding: "0.45rem 0.75rem" }}>
-                                        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                                          <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
-                                            <div style={{ width: s.finalPct+"%", height: "100%", background: "#16a34a", borderRadius: 3 }} />
-                                          </div>
-                                          <span style={{ fontWeight: 700, color: "#16a34a" }}>{s.finalPct}%</span>
+                                {strengthItems.map((s, i) => (
+                                  <tr key={s.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
+                                    <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{s.id}</td>
+                                    <td style={{ padding: "0.45rem 0.75rem" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                                        <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                          <div style={{ width: s.finalPct+"%", height: "100%", background: "#16a34a", borderRadius: 3 }} />
                                         </div>
-                                      </td>
-                                      <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{d}</td>
-                                    </tr>
-                                  );
-                                })}
+                                        <span style={{ fontWeight: 700, color: "#16a34a" }}>{s.finalPct}%</span>
+                                      </div>
+                                    </td>
+                                    <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{s.combinedDiff.toFixed(2)}</td>
+                                  </tr>
+                                ))}
                               </tbody>
                             </table>
                         }
@@ -983,21 +1060,20 @@ function App() {
                           ? <p style={{ color: "#6b7280", fontSize: "0.875rem", margin: 0 }}>No items flagged.</p>
                           : <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
                               {priorityItems.map(p => {
-                                const d = p.minDiff === p.maxDiff ? p.minDiff.toFixed(2) : `${p.minDiff.toFixed(2)}–${p.maxDiff.toFixed(2)}`;
-                                const dc = p.minDisc === p.maxDisc ? p.minDisc.toFixed(2) : `${p.minDisc.toFixed(2)}–${p.maxDisc.toFixed(2)}`;
                                 const fs = FLAG_STYLES[p.flag] || { color: "#374151", bg: "#f3f4f6" };
                                 return (
                                   <div key={p.id} style={{ border: `1px solid ${fs.color}40`, borderLeft: `4px solid ${fs.color}`, borderRadius: 8, padding: "0.85rem 1rem", background: fs.bg + "88" }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
                                       <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: "0.95rem", color: "#1e3a8a" }}>Item {p.id}</span>
                                       <span style={{ background: fs.bg, color: fs.color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800 }}>{p.flag}</span>
+                                      {p.smallSample && <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 700 }}>⚠️ Small sample ({p.combinedN} students)</span>}
                                     </div>
                                     <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", fontSize: "0.82rem", color: "#374151" }}>
                                       <span><strong>{p.finalPct}%</strong> correct</span>
                                       <span><strong>{p.finalIncorrect}</strong> students incorrect</span>
-                                      <span>Difficulty: <strong>{d}</strong></span>
-                                      <span>Discrimination: <strong>{dc}</strong></span>
-                                      {p.minCITC !== null && <span>CITC: <strong>{p.minCITC === p.maxCITC ? p.minCITC.toFixed(2) : `${p.minCITC.toFixed(2)}–${p.maxCITC.toFixed(2)}`}</strong></span>}
+                                      <span>Difficulty: <strong>{p.combinedDiff.toFixed(2)}</strong></span>
+                                      {p.combinedDisc !== null && <span>Discrimination: <strong>{p.combinedDisc.toFixed(2)}</strong></span>}
+                                      {p.combinedCITC !== null && <span>CITC: <strong>{p.combinedCITC.toFixed(2)}</strong></span>}
                                     </div>
                                     {p.topWrong && (
                                       <div style={{ marginTop: "0.4rem", fontSize: "0.8rem", color: "#4b5563" }}>
@@ -1041,6 +1117,41 @@ function App() {
                             </div>
                         }
                       </div>
+
+                      {/* ── ITEMS FOR POTENTIAL REVIEW ── */}
+                      {reviewItems.length > 0 && (
+                        <div style={{ marginTop: "1.5rem" }}>
+                          <h2 style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "0 0 0.25rem", fontFamily: "'Playfair Display', serif" }}>🔎 Items for Potential Review</h2>
+                          <p style={{ fontSize: "0.78rem", color: "#6b7280", margin: "0 0 0.75rem", lineHeight: 1.5 }}>
+                            These items show low discrimination but high mastery (≥80% correct). This is likely a floor effect — nearly everyone got it right, leaving little room to differentiate. They may be intentionally easy, but are worth reviewing to confirm they're assessing the right level of complexity.
+                          </p>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
+                            <thead>
+                              <tr style={{ background: "#f8fafc" }}>
+                                {["Item ID", "% Correct", "Difficulty", "Discrimination", "CITC", "Sample"].map(h => (
+                                  <th key={h} style={{ padding: "0.45rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "2px solid #e5e7eb", fontSize: "0.78rem" }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {reviewItems.map((p, i) => (
+                                <tr key={p.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
+                                  <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{p.id}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", fontWeight: 700, color: "#16a34a" }}>{p.finalPct}%</td>
+                                  <td style={{ padding: "0.45rem 0.75rem" }}>{p.combinedDiff.toFixed(2)}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", color: "#d97706", fontWeight: 600 }}>{p.combinedDisc !== null ? p.combinedDisc.toFixed(2) : "N/A"}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem", color: p.combinedCITC !== null && p.combinedCITC < 0.30 ? "#7c3aed" : "#374151", fontWeight: p.combinedCITC !== null && p.combinedCITC < 0.30 ? 700 : 400 }}>{p.combinedCITC !== null ? p.combinedCITC.toFixed(2) : "N/A"}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem" }}>
+                                    {p.smallSample
+                                      ? <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 4, padding: "0.1rem 0.4rem", fontSize: "0.7rem", fontWeight: 700 }}>⚠️ {p.combinedN}</span>
+                                      : <span style={{ color: "#6b7280" }}>{p.combinedN}</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
 
                     </div>
 
