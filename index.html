@@ -477,7 +477,8 @@ function buildReport(teachers) {
       const total = correct + incorrect;
       const diff = parseFloat(itm.ItemDifficulty);
       const disc = parseFloat(itm.DiscriminationIndex);
-      if (!itemAgg[id]) itemAgg[id] = { correct:0, total:0, difficulties:[], discriminations:[], citcs:[], topDistractor:"", topDistractorCount:0 };
+      if (!itemAgg[id]) itemAgg[id] = { correct:0, total:0, difficulties:[], discriminations:[], citcs:[], topDistractor:"", topDistractorCount:0, title:"" };
+      if (itm.Title && itm.Title.trim()) itemAgg[id].title = itm.Title.trim();
       itemAgg[id].correct += correct;
       itemAgg[id].total += total;
       if (!isNaN(diff)) itemAgg[id].difficulties.push(diff);
@@ -571,7 +572,7 @@ function buildReport(teachers) {
       const combinedDiff = p ? p.difficulty : Math.min(...agg.difficulties);
       const combinedDisc = p ? p.discrimination : null;
       const combinedCITC = p ? p.citc : null;
-      return { id, finalPct, combinedDiff, combinedDisc, combinedCITC };
+      return { id, title: agg.title || "", finalPct, combinedDiff, combinedDisc, combinedCITC };
     })
     .sort((a, b) => a.combinedDiff - b.combinedDiff)  // closest to 0.80 first
     .slice(0, 5);
@@ -637,7 +638,7 @@ function buildReport(teachers) {
       }
 
       return {
-        id, finalPct, finalIncorrect, flag, isReviewOnly, smallSample, combinedN,
+        id, title: agg.title || "", finalPct, finalIncorrect, flag, isReviewOnly, smallSample, combinedN,
         combinedDiff, combinedDisc, combinedCITC, topWrong,
         minDiff: Math.min(...agg.difficulties), maxDiff: Math.max(...agg.difficulties),
         studentsWrongByTeacher: studentAgg[id]?.studentsWrongByTeacher || {}
@@ -1266,7 +1267,7 @@ function App() {
                           : <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                               <thead>
                                 <tr style={{ background: "#f8fafc" }}>
-                                  {["Item ID", "% Correct", "Difficulty", "Discrimination", "CITC"].map(h => (
+                                  {["Item", "% Correct", "Difficulty", "Discrimination", "CITC"].map(h => (
                                     <th key={h} style={{ padding: "0.45rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "2px solid #e5e7eb", fontSize: "0.78rem" }}>{h}</th>
                                   ))}
                                 </tr>
@@ -1277,7 +1278,10 @@ function App() {
                                   const citcColor = s.combinedCITC === null ? "#9ca3af" : s.combinedCITC >= 0.40 ? "#16a34a" : s.combinedCITC >= 0.30 ? "#d97706" : "#7c3aed";
                                   return (
                                     <tr key={s.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
-                                      <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{s.id}</td>
+                                      <td style={{ padding: "0.45rem 0.75rem" }}>
+                                        <div style={{ fontFamily: "monospace", color: "#374151", fontSize: "0.78rem" }}>{s.id}</div>
+                                        {s.title && <div style={{ fontSize: "0.75rem", color: s.title === "Untitled item" ? "#9ca3af" : "#4b5563", marginTop: "0.15rem", fontStyle: "italic" }}>{s.title}</div>}
+                                      </td>
                                       <td style={{ padding: "0.45rem 0.75rem" }}>
                                         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                                           <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
@@ -1309,6 +1313,7 @@ function App() {
                                   <div key={p.id} style={{ border: `1px solid ${fs.color}40`, borderLeft: `4px solid ${fs.color}`, borderRadius: 8, padding: "0.85rem 1rem", background: fs.bg + "88" }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
                                       <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: "0.95rem", color: "#1e3a8a" }}>Item {p.id}</span>
+                                      {p.title && <span style={{ fontSize: "0.82rem", color: p.title === "Untitled item" ? "#9ca3af" : "#4b5563", fontStyle: "italic" }}>{p.title}</span>}
                                       <span style={{ background: fs.bg, color: fs.color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800 }}>{p.flag}</span>
                                       {p.smallSample && <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 700 }}>⚠️ Small sample ({p.combinedN} students)</span>}
                                     </div>
@@ -1372,7 +1377,7 @@ function App() {
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                             <thead>
                               <tr style={{ background: "#f8fafc" }}>
-                                {["Item ID", "% Correct", "Difficulty", "Discrimination", "CITC", "Sample"].map(h => (
+                                {["Item", "% Correct", "Difficulty", "Discrimination", "CITC", "Sample"].map(h => (
                                   <th key={h} style={{ padding: "0.45rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "2px solid #e5e7eb", fontSize: "0.78rem" }}>{h}</th>
                                 ))}
                               </tr>
@@ -1380,7 +1385,10 @@ function App() {
                             <tbody>
                               {reviewItems.map((p, i) => (
                                 <tr key={p.id} style={{ borderBottom: "1px solid #f3f4f6", background: i%2===0?"white":"#fafafa" }}>
-                                  <td style={{ padding: "0.45rem 0.75rem", fontFamily: "monospace", color: "#374151" }}>{p.id}</td>
+                                  <td style={{ padding: "0.45rem 0.75rem" }}>
+                                    <div style={{ fontFamily: "monospace", color: "#374151", fontSize: "0.78rem" }}>{p.id}</div>
+                                    {p.title && <div style={{ fontSize: "0.75rem", color: p.title === "Untitled item" ? "#9ca3af" : "#4b5563", marginTop: "0.15rem", fontStyle: "italic" }}>{p.title}</div>}
+                                  </td>
                                   <td style={{ padding: "0.45rem 0.75rem", fontWeight: 700, color: "#16a34a" }}>{p.finalPct}%</td>
                                   <td style={{ padding: "0.45rem 0.75rem", color: "#374151" }}>{p.combinedDiff.toFixed(2)}</td>
                                   <td style={{ padding: "0.45rem 0.75rem", color: "#6b7280" }}>{p.combinedDisc !== null ? p.combinedDisc.toFixed(2) : "N/A"}</td>
