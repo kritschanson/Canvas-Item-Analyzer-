@@ -816,7 +816,6 @@ function App() {
         setError(`Error parsing "${file.name}": ${e.message}`);
       }
     }
-    setActiveTab("data");
     setPendingLabel(null);
   }, [assessmentName]);
 
@@ -917,20 +916,24 @@ function App() {
                 <input id="fileIn" type="file" accept=".csv" multiple onChange={e => processFiles(e.target.files)} style={{ display: "none" }} />
               </div>
 
-              {teachers.length > 0 && (
-                <div style={{ marginTop: "1rem", display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
-                  <span style={{ color: "#6b7280", fontSize: "0.8rem", fontWeight: 600 }}>LOADED:</span>
-                  {teachers.map(t => (
-                    <span key={t.label} style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.35rem" }}>
-                      {t.label} {t.item && t.student ? "✓✓" : "✓"}
-                      <span onClick={() => removeTeacher(t.label)} style={{ cursor: "pointer", color: "#3b82f6", fontWeight: 700 }}>✕</span>
-                    </span>
-                  ))}
-                  {subgroupMap && <span style={{ background: "#dcfce7", color: "#15803d", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600 }}>✓ Subgroups</span>}
-                  {priorMap && <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600 }}>✓ Prior Analytics</span>}
-                  <button onClick={() => setActiveTab("data")} style={{ marginLeft: "auto", background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.4rem 1rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    View Data →
-                  </button>
+              {(teachers.length > 0 || subgroupMap || priorMap) && (
+                <div style={{ marginTop: "1rem", background: "white", borderRadius: 12, padding: "0.85rem 1rem", boxShadow: "0 2px 12px rgba(30,58,138,0.06)", border: "1px solid #e0e7ff" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                    <span style={{ color: "#6b7280", fontSize: "0.78rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>Files Loaded — keep adding until ready</span>
+                    <button onClick={() => setActiveTab("data")} style={{ background: "#1d4ed8", color: "white", border: "none", borderRadius: 8, padding: "0.4rem 1rem", fontSize: "0.82rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                      View Data →
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
+                    {teachers.map(t => (
+                      <span key={t.label} style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                        {t.label} {t.item && t.student ? "✓✓" : "✓"}
+                        <span onClick={() => removeTeacher(t.label)} style={{ cursor: "pointer", color: "#3b82f6", fontWeight: 700 }}>✕</span>
+                      </span>
+                    ))}
+                    {subgroupMap && <span style={{ background: "#dcfce7", color: "#15803d", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600 }}>✓ Subgroups</span>}
+                    {priorMap && <span style={{ background: "#fef9c3", color: "#92400e", borderRadius: 20, padding: "0.25rem 0.7rem", fontSize: "0.8rem", fontWeight: 600 }}>✓ Prior Analytics</span>}
+                  </div>
                 </div>
               )}
 
@@ -977,6 +980,13 @@ function App() {
                   <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Add more files</span>
                   <input id="fileIn2" type="file" accept=".csv" multiple onChange={e => processFiles(e.target.files)} style={{ display: "none" }} />
                 </div>
+              </div>
+
+              <div style={{ textAlign: "center", margin: "0 0 1.25rem" }}>
+                <button onClick={generateReport}
+                  style={{ background: "linear-gradient(135deg, #1e40af, #3b82f6)", color: "white", border: "none", borderRadius: 10, padding: "0.85rem 2.5rem", fontSize: "1rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 4px 18px rgba(30,64,175,0.35)" }}>
+                  📊 Generate Quiz Report
+                </button>
               </div>
 
               {/* Item table */}
@@ -1059,26 +1069,7 @@ function App() {
                         <span style={{ background: totalProfPct >= 70 ? "#dcfce7" : "#fee2e2", color: totalProfPct >= 70 ? "#16a34a" : "#dc2626", borderRadius: 20, padding: "0.2rem 0.65rem", fontSize: "0.75rem", fontWeight: 700 }}>
                           {totalProfPct}% Proficient
                         </span>
-                        {(() => {
-                          const PX_PER = 4;
-                          const maxCount = Math.max(...Object.values(aggGrade), 1);
-                          const chartH = maxCount * PX_PER + 16;
-                          return (
-                            <div style={{ display: "flex", alignItems: "flex-end", gap: "0.2rem", height: chartH }}>
-                              {[["A","#16a34a"],["B","#65a30d"],["C","#d97706"],["D","#ea580c"],["F","#dc2626"]].map(([g, color]) => {
-                                const count = aggGrade[g];
-                                const barH = count * PX_PER;
-                                return (
-                                  <div key={g} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.1rem", width: 28, justifyContent: "flex-end" }}>
-                                    {count > 0 && <div style={{ fontSize: "0.6rem", fontWeight: 700, color }}>{count}</div>}
-                                    <div style={{ width: "100%", height: barH, background: color, borderRadius: "2px 2px 0 0", minHeight: count > 0 ? 3 : 0 }} />
-                                    <div style={{ fontSize: "0.62rem", fontWeight: 700, color }}>{g}</div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        })()}
+
                       </div>
                       <span style={{ color: "#6b7280", fontSize: "0.8rem", fontWeight: 700 }}>{studentTableOpen ? "▲" : "▼"}</span>
                     </div>
@@ -1123,12 +1114,7 @@ function App() {
                 );
               })()}
 
-              <div style={{ textAlign: "center" }}>
-                <button onClick={generateReport}
-                  style={{ background: "linear-gradient(135deg, #1e40af, #3b82f6)", color: "white", border: "none", borderRadius: 10, padding: "0.85rem 2.5rem", fontSize: "1rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 4px 18px rgba(30,64,175,0.35)" }}>
-                  📊 Generate Quiz Report
-                </button>
-              </div>
+
             </div>
           )}
 
@@ -1232,19 +1218,20 @@ function App() {
                       {totalStudents > 0 && (() => {
                         const maxCount = Math.max(...Object.values(gradeDist), 1);
                         const PX_PER = 4;
-                        const chartH = maxCount * PX_PER + 20;
+                        const chartH = maxCount * PX_PER + 36;
                         return (
                           <div style={{ background: "#f8fafc", borderRadius: 10, padding: "1rem 1.25rem", marginBottom: "1rem", border: "1px solid #e0e7ff", display: "flex", gap: "1.5rem", flexWrap: "wrap", alignItems: "flex-start" }}>
                             <div style={{ flex: 1, minWidth: 160 }}>
-                              <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.4rem" }}>Grade Distribution</div>
+                              <div style={{ fontSize: "0.68rem", fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.6rem" }}>Grade Distribution</div>
                               <div style={{ display: "flex", alignItems: "flex-end", gap: "0.5rem", height: chartH }}>
                                 {["A","B","C","D","F"].map(g => {
                                   const count = gradeDist[g];
                                   const color = GRADE_COLORS[g];
+                                  const barH = count * PX_PER;
                                   return (
                                     <div key={g} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: "0.2rem", justifyContent: "flex-end" }}>
-                                      <div style={{ fontSize: "0.7rem", fontWeight: 700, color, minHeight: "0.9rem" }}>{count > 0 ? count : ""}</div>
-                                      <div style={{ width: "100%", height: count * PX_PER, background: color, borderRadius: "4px 4px 0 0", minHeight: count > 0 ? 4 : 0 }} />
+                                      <div style={{ fontSize: "0.7rem", fontWeight: 700, color, lineHeight: 1, marginBottom: "0.15rem" }}>{count > 0 ? count : " "}</div>
+                                      <div style={{ width: "100%", height: barH, background: color, borderRadius: "4px 4px 0 0", minHeight: count > 0 ? 4 : 0 }} />
                                       <div style={{ fontSize: "0.72rem", fontWeight: 700, color }}>{g}</div>
                                     </div>
                                   );
