@@ -7,6 +7,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; }
@@ -1653,24 +1655,88 @@ function App() {
                           Downloads a PDF of the full Data and Report tabs so your team can save it to your shared drive for future reference.
                         </p>
                         <button
-                          onClick={() => {
-                            const prevTab = activeTab;
-                            // Render both data and analysis by switching to analysis (report is primary)
-                            setActiveTab("analysis");
-                            document.body.classList.add("printing");
-                            setTimeout(() => {
-                              window.print();
-                              setTimeout(() => {
-                                document.body.classList.remove("printing");
-                                setActiveTab(prevTab);
-                              }, 500);
-                            }, 150);
+                          onClick={async () => {
+                            const { jsPDF } = window.jspdf;
+                            const btn = document.querySelector(".pdf-export-btn");
+                            if (btn) btn.textContent = "⏳ Generating PDF...";
+
+                            // Temporarily expand the scroll container so everything renders
+                            const scrollEl = document.querySelector("#root > div > div:last-child");
+                            const prevOverflow = scrollEl ? scrollEl.style.overflowY : "";
+                            const prevHeight = scrollEl ? scrollEl.style.height : "";
+                            if (scrollEl) { scrollEl.style.overflowY = "visible"; scrollEl.style.height = "auto"; }
+                            const rootEl = document.querySelector("#root > div");
+                            const prevRootHeight = rootEl ? rootEl.style.height : "";
+                            if (rootEl) rootEl.style.height = "auto";
+
+                            // Target the report card
+                            const reportEl = document.getElementById("report-top");
+                            const target = reportEl ? reportEl.parentElement : document.querySelector(".tab-analysis");
+
+                            await new Promise(r => setTimeout(r, 100));
+
+                            try {
+                              const canvas = await html2canvas(target, {
+                                scale: 1.5,
+                                useCORS: true,
+                                logging: false,
+                                backgroundColor: "#ffffff",
+                                scrollX: 0,
+                                scrollY: 0,
+                                windowWidth: target.scrollWidth,
+                                windowHeight: target.scrollHeight,
+                              });
+
+                              const imgData = canvas.toDataURL("image/jpeg", 0.92);
+                              const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+                              const pageW = pdf.internal.pageSize.getWidth();
+                              const pageH = pdf.internal.pageSize.getHeight();
+                              const margin = 10;
+                              const contentW = pageW - margin * 2;
+
+                              const imgW = canvas.width;
+                              const imgH = canvas.height;
+                              const ratio = contentW / (imgW / 1.5 * (25.4 / 96));
+                              const scaledW = contentW;
+                              const scaledH = (imgH / 1.5) * (25.4 / 96) * ratio;
+
+                              const pageContentH = pageH - margin * 2;
+                              let yOffset = 0;
+                              let page = 0;
+
+                              while (yOffset < scaledH) {
+                                if (page > 0) pdf.addPage();
+                                // Crop the portion of the image for this page
+                                const srcY = (yOffset / scaledH) * imgH;
+                                const srcH = Math.min((pageContentH / scaledH) * imgH, imgH - srcY);
+                                const pageCanvas = document.createElement("canvas");
+                                pageCanvas.width = imgW;
+                                pageCanvas.height = srcH;
+                                const ctx = pageCanvas.getContext("2d");
+                                ctx.drawImage(canvas, 0, srcY, imgW, srcH, 0, 0, imgW, srcH);
+                                const pageImg = pageCanvas.toDataURL("image/jpeg", 0.92);
+                                const sliceH = (srcH / imgH) * scaledH;
+                                pdf.addImage(pageImg, "JPEG", margin, margin, scaledW, sliceH);
+                                yOffset += pageContentH;
+                                page++;
+                              }
+
+                              pdf.save((assessmentName || "Assessment") + "_Report.pdf");
+                            } catch(e) {
+                              alert("PDF generation failed: " + e.message);
+                            } finally {
+                              if (scrollEl) { scrollEl.style.overflowY = prevOverflow; scrollEl.style.height = prevHeight; }
+                              if (rootEl) rootEl.style.height = prevRootHeight;
+                              if (btn) btn.textContent = "⬇ Download PDF";
+                            }
                           }}
+                          className="pdf-export-btn"
                           style={{ background: "#16a34a", color: "white", border: "none", borderRadius: 8, padding: "0.5rem 1.2rem", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                          🖨️ Print / Save as PDF
+                          ⬇ Download PDF
                         </button>
                         <p style={{ fontSize: "0.72rem", color: "#6b7280", margin: "0.6rem 0 0" }}>
-                          In the print dialog, choose <strong>Save as PDF</strong> as the destination. Set layout to <strong>Landscape</strong> for best results.
+                          Captures the full report as a PDF — charts, tables, and all. May take a few seconds to generate.
                         </p>
                       </div>
 
