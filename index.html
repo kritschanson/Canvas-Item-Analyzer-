@@ -8,7 +8,26 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <style>*, *::before, *::after { box-sizing: border-box; } body { margin: 0; padding: 0; }</style>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 0; }
+    @media print {
+      body { background: white !important; }
+      .no-print { display: none !important; }
+      * { box-shadow: none !important; }
+      tr { page-break-inside: avoid; }
+      button { display: none !important; }
+      #root > div { height: auto !important; overflow: visible !important; display: block !important; }
+      #root > div > div { overflow: visible !important; height: auto !important; flex: none !important; }
+    }
+    /* When printing, force both data and analysis tabs visible */
+    body.printing .tab-data,
+    body.printing .tab-analysis { display: block !important; }
+    body.printing .no-print { display: none !important; }
+    body.printing * { box-shadow: none !important; }
+    body.printing #root > div { height: auto !important; overflow: visible !important; display: block !important; }
+    body.printing #root > div > div { overflow: visible !important; height: auto !important; flex: none !important; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
@@ -352,24 +371,45 @@ function buildGrowthData(teachers, subgroupMap, priorMap, assessmentName) {
     const currentEntry = { assessment: assessmentName || "Current", date: currentDate, score: stu.pct };
 
     // Determine risk status
-    const allHistory = [...history, currentEntry];
-    const lastTwo = allHistory.slice(-2);
+    // Logic: derive prior risk state from history, then step accordingly
     const proficient = stu.pct >= 70;
 
-    // Check consecutive non-proficiency
+    // Helper: derive what risk status a student would have had at a given history slice
+    const deriveStatus = (hist) => {
+      if (hist.length === 0) return "OK";
+      const cur = hist[hist.length - 1];
+      const prev = hist.length >= 2 ? hist[hist.length - 2] : null;
+      const curProf = cur.score >= 70;
+      const prevProf = prev ? prev.score >= 70 : null;
+      if (!curProf) {
+        // Not proficient — check if previously also not proficient
+        if (prev && !prevProf) return "PERSISTENTLY_AT_RISK";
+        return "AT_RISK";
+      } else {
+        // Proficient — check prior status to determine if recovering or cleared
+        const priorStatus = hist.length >= 2 ? deriveStatus(hist.slice(0, -1)) : "OK";
+        if (priorStatus === "PERSISTENTLY_AT_RISK") return "AT_RISK";   // step down one level
+        if (priorStatus === "AT_RISK") return "RECOVERING";              // one more clear needed
+        if (priorStatus === "RECOVERING") return "OK";                   // fully cleared
+        return "OK";
+      }
+    };
+
+    const priorStatus = deriveStatus(history);
     let riskStatus = "OK";
     if (!proficient) {
-      if (history.length > 0 && history[history.length - 1].score < 70) {
+      // Not proficient this assessment
+      if (priorStatus === "PERSISTENTLY_AT_RISK" || priorStatus === "AT_RISK") {
         riskStatus = "PERSISTENTLY_AT_RISK";
       } else {
         riskStatus = "AT_RISK";
       }
     } else {
-      // Check if recovering (was at risk before)
-      const hadRisk = history.length > 0 && history[history.length - 1].score < 70;
-      // Need 2 consecutive proficient to fully clear
-      const prevProficient = history.length > 0 && history[history.length - 1].score >= 70;
-      if (hadRisk && !prevProficient) riskStatus = "RECOVERING";
+      // Proficient this assessment — step down from prior status
+      if (priorStatus === "PERSISTENTLY_AT_RISK") riskStatus = "AT_RISK";
+      else if (priorStatus === "AT_RISK") riskStatus = "RECOVERING";
+      else if (priorStatus === "RECOVERING") riskStatus = "OK";
+      else riskStatus = "OK";
     }
 
     return { ...stu, subgroups, history, currentEntry, riskStatus, proficient };
@@ -800,9 +840,18 @@ function App() {
         }
 
         // Derive label: use forLabel if patching, else from filename
-        const fileLabel = forLabel || baseName
-          .replace(/[_-]?(item[_-]?analysis|student[_-]?analysis|item|student)[_-]?/gi, "")
-          .replace(/[_-]/g, " ").trim() || baseName;
+        // Strip item/student suffix, underscores, and the assessment name portion leaving just the teacher name
+        const fileLabel = forLabel || (() => {
+          let lbl = baseName
+            .replace(/[_-]?(item[_-]?analysis|student[_-]?analysis|item|student)[_-]?/gi, "")
+            .replace(/[_-]/g, " ").trim();
+          // If we parsed an assessment name, strip it from the label too
+          if (nameMatch && nameMatch[2]) {
+            const assessPart = nameMatch[2].replace(/[_-]/g, " ").trim();
+            lbl = lbl.replace(assessPart, "").trim();
+          }
+          return lbl || baseName;
+        })();
 
         const parsed = type === "item" ? parseItemCSV(rows, fileLabel) : parseStudentCSV(rows, fileLabel);
 
@@ -859,7 +908,7 @@ function App() {
       <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
       {/* Header */}
-      <div style={{ background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)", padding: "1.5rem 2rem 0", boxShadow: "0 4px 24px rgba(30,58,138,0.35)", flexShrink: 0 }}>
+      <div className="no-print" style={{ background: "linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)", padding: "1.5rem 2rem 0", boxShadow: "0 4px 24px rgba(30,58,138,0.35)", flexShrink: 0 }}>
         <div style={{ maxWidth: 960, margin: "0 auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
             <span style={{ fontSize: "1.7rem" }}>📚</span>
@@ -969,7 +1018,7 @@ function App() {
           )}
 
           {activeTab === "data" && teachers.length > 0 && (
-            <div>
+            <div className="tab-data">
               {/* Teacher cards grid */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem", marginBottom: "1.25rem" }}>
                 {teachers.map(t => (
@@ -1121,7 +1170,7 @@ function App() {
 
           {/* ── ANALYSIS TAB ── */}
           {activeTab === "analysis" && (
-            <div>
+            <div className="tab-analysis">
               {!report && (
                 <div style={{ textAlign: "center", padding: "3rem", color: "#6b7280" }}>
                   <div style={{ fontSize: "2.5rem", marginBottom: "0.75rem" }}>📊</div>
@@ -1201,13 +1250,14 @@ function App() {
                         <div style={{ fontSize: "0.72rem", fontWeight: 700, color: "#1e3a8a", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.5rem" }}>Priority Item Flag Guide</div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
                           {[
-                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered this item correctly. Most students struggled with it."],
-                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Students who scored high overall and students who scored low overall answered this item at about the same rate (Discrimination Index below 0.20). It didn\'t help tell the difference between who knows the content and who doesn\'t. Often appears on very easy items — not always alarming, but the item isn\'t doing much diagnostic work."],
-                            ["LOW CITC", "#7c3aed", "#f5f3ff", "Students who did well on the quiz overall did not reliably get this item right (Corrected Item-Total Correlation below 0.30). Getting it right or wrong didn\'t predict overall performance. The item may be testing a different skill than the rest of the quiz — worth examining whether it aligns with the learning target."],
+                            ["LOW DIFFICULTY", "#dc2626", "#fee2e2", "Fewer than 55% of students answered correctly (Difficulty Index below 0.55). This measures how many students got the item right. A low score means most students struggled, which may signal a gap in instruction or an item that needs review."],
+                            ["LOW DISCRIMINATION", "#d97706", "#fef9c3", "Discrimination Index below 0.20. This measures whether students who scored well overall got this item right more often than students who scored poorly. A low score means the item did not distinguish between students who know the material and those who don\'t."],
+                            ["LOW CITC (Corrected Item-Total Correlation)", "#7c3aed", "#f5f3ff", "CITC below 0.30. This measures how well a student\'s performance on this item predicts their overall quiz score. A low score means getting this item right or wrong had little connection to overall performance, which may indicate the item is testing something different from the rest of the quiz."],
                           ].map(([label, color, bg, desc]) => (
-                            <div key={label} style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
-                              <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", marginTop: "0.15rem", flexShrink: 0 }}>{label}</span>
-                              <span style={{ fontSize: "0.78rem", color: "#4b5563", lineHeight: 1.5 }}>{desc}</span>
+                            <div key={label} style={{ display: "flex", gap: "0.5rem", alignItems: "baseline", flexWrap: "wrap" }}>
+                              <span style={{ background: bg, color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>
+                              <span style={{ fontSize: "0.75rem", color: "#6b7280", fontWeight: 700, flexShrink: 0 }}>—</span>
+                              <span style={{ fontSize: "0.78rem", color: "#4b5563", lineHeight: 1.5, textAlign: "justify" }}>{desc}</span>
                             </div>
                           ))}
                         </div>
@@ -1521,6 +1571,15 @@ function App() {
                       {/* ── SMALL SUBGROUP SPOTLIGHT ── */}
                       {growthData && Object.values(growthData.subgroupStats).some(sg => !sg.large) && (() => {
                         const smallSubgroups = Object.values(growthData.subgroupStats).filter(sg => !sg.large);
+                        const riskOrder = { "PERSISTENTLY_AT_RISK": 0, "AT_RISK": 1, "RECOVERING": 2, "OK": 3 };
+                        const riskLabels = {
+                          "PERSISTENTLY_AT_RISK": { label: "Persistently At Risk", color: "#dc2626", bg: "#fee2e2" },
+                          "AT_RISK":              { label: "At Risk",              color: "#d97706", bg: "#fef9c3" },
+                          "RECOVERING":           { label: "Recovering",           color: "#7c3aed", bg: "#f5f3ff" },
+                          "OK":                   { label: "Proficient",           color: "#16a34a", bg: "#dcfce7" },
+                        };
+                        // Get sorted teacher keys
+                        const teacherKeys = [...new Set(growthData.enriched.map(s => s.teacherLabel))].sort();
                         return (
                           <div style={{ marginTop: "2rem" }}>
                             <h2 style={{ color: "#1e40af", fontSize: "1rem", fontWeight: 700, margin: "0 0 0.25rem", fontFamily: "'Playfair Display', serif" }}>🔦 Small Subgroup Spotlight</h2>
@@ -1528,53 +1587,92 @@ function App() {
                               These subgroups have 20 or fewer students — too small for reliable group comparisons. Each student is listed individually. The focus here is growth conversation: what is working for students who are thriving, and what interventions or shared materials might support those who are not?
                             </p>
                             {smallSubgroups.map(sg => {
-                              const members = growthData.enriched.filter(s => s.subgroups.includes(sg.name));
-                              const thriving = members.filter(s => s.proficient);
-                              const struggling = members.filter(s => !s.proficient);
+                              // Build all rows across all teachers for this subgroup
+                              const allRows = [];
+                              teacherKeys.forEach(teacherKey => {
+                                const members = growthData.enriched.filter(s => s.teacherLabel === teacherKey && s.subgroups.includes(sg.name));
+                                if (members.length === 0) return;
+                                const sorted = [...members].sort((a, b) => (riskOrder[a.riskStatus] ?? 3) - (riskOrder[b.riskStatus] ?? 3) || a.name.localeCompare(b.name));
+                                sorted.forEach((s, i) => allRows.push({ ...s, teacherKey, firstInTeacher: i === 0, teacherCount: sorted.length }));
+                              });
+                              if (allRows.length === 0) return null;
+                              const hasPrior = allRows.some(s => s.history.length > 0);
+                              const avgPct = Math.round(allRows.reduce((a, s) => a + s.pct, 0) / allRows.length);
                               return (
-                                <div key={sg.name} style={{ background: "white", border: "1px solid #e0e7ff", borderRadius: 10, padding: "1rem 1.1rem", marginBottom: "1rem" }}>
-                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-                                    <div style={{ fontWeight: 700, color: "#1e3a8a", fontSize: "0.9rem" }}>{sg.name} <span style={{ fontWeight: 400, color: "#6b7280", fontSize: "0.78rem" }}>({sg.count} students)</span></div>
-                                    <span style={{ background: "#f3f4f6", color: "#374151", borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.72rem", fontWeight: 600 }}>Avg: {sg.avg}%</span>
+                                <div key={sg.name} style={{ background: "white", border: "1px solid #e0e7ff", borderRadius: 10, overflow: "hidden", marginBottom: "1rem" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.6rem 0.85rem", background: "#f0f4ff", borderBottom: "1px solid #e0e7ff" }}>
+                                    <span style={{ fontWeight: 700, color: "#1e3a8a", fontSize: "0.88rem" }}>{sg.name} <span style={{ fontWeight: 400, color: "#6b7280", fontSize: "0.75rem" }}>· {allRows.length} student{allRows.length !== 1 ? "s" : ""}</span></span>
+                                    <span style={{ fontSize: "0.75rem", color: "#6b7280", fontWeight: 600 }}>Avg: {avgPct}%</span>
                                   </div>
-                                  {thriving.length > 0 && (
-                                    <div style={{ marginBottom: "0.6rem" }}>
-                                      <div style={{ fontSize: "0.7rem", fontWeight: 700, color: "#16a34a", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.35rem" }}>✓ Proficient — What is working here?</div>
-                                      <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-                                        {thriving.sort((a,b) => b.pct - a.pct).map(s => (
-                                          <div key={s.name} style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                                            <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "#1e3a8a" }}>{s.name}</span>
-                                            <span style={{ fontWeight: 700, color: "#16a34a", fontSize: "0.82rem" }}>{s.pct}%</span>
-                                            {s.history.length > 0 && <div style={{ display: "flex", gap: "0.2rem" }}>{s.history.map((h,i) => <span key={i} style={{ background: h.score >= 70 ? "#dcfce7" : "#fee2e2", color: h.score >= 70 ? "#16a34a" : "#dc2626", borderRadius: 3, padding: "0.1rem 0.3rem", fontSize: "0.65rem", fontWeight: 700 }}>{h.score}%</span>)}</div>}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                  {struggling.length > 0 && (
-                                    <div>
-                                      <div style={{ fontSize: "0.7rem", fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "0.35rem" }}>✗ Not yet proficient — Growth focus: interventions &amp; materials</div>
-                                      <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
-                                        {struggling.sort((a,b) => a.pct - b.pct).map(s => {
-                                          const rc = s.riskStatus === "PERSISTENTLY_AT_RISK" ? { badge: "#dc2626", label: "Persistently At Risk" } : { badge: "#d97706", label: "At Risk" };
-                                          return (
-                                            <div key={s.name} style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                                              <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "#1e3a8a" }}>{s.name}</span>
-                                              <span style={{ fontWeight: 700, color: "#dc2626", fontSize: "0.82rem" }}>{s.pct}%</span>
-                                              {priorMap && <span style={{ background: "#fee2e2", color: rc.badge, borderRadius: 3, padding: "0.1rem 0.4rem", fontSize: "0.65rem", fontWeight: 800 }}>{rc.label}</span>}
-                                              {s.history.length > 0 && <div style={{ display: "flex", gap: "0.2rem" }}>{s.history.map((h,i) => <span key={i} style={{ background: h.score >= 70 ? "#dcfce7" : "#fee2e2", color: h.score >= 70 ? "#16a34a" : "#dc2626", borderRadius: 3, padding: "0.1rem 0.3rem", fontSize: "0.65rem", fontWeight: 700 }}>{h.score}%</span>)}</div>}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  )}
+                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+                                    <thead>
+                                      <tr style={{ background: "#f8fafc" }}>
+                                        <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb", fontSize: "0.72rem", width: "12%" }}>Teacher</th>
+                                        <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb", fontSize: "0.72rem" }}>Student</th>
+                                        <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb", fontSize: "0.72rem" }}>Status</th>
+                                        <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb", fontSize: "0.72rem" }}>{hasPrior ? "Score History → Current" : "Current Score"}</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {allRows.map((s, i) => {
+                                        const rl = riskLabels[s.riskStatus] || riskLabels["OK"];
+                                        return (
+                                          <tr key={s.name} style={{ borderBottom: "1px solid #f3f4f6", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                                            <td style={{ padding: "0.45rem 0.75rem", fontWeight: 700, color: "#1e3a8a", fontSize: "0.78rem", verticalAlign: "middle", borderRight: "2px solid #e0e7ff", background: "#f8fafc" }}>
+                                              {s.firstInTeacher ? s.teacherKey : ""}
+                                            </td>
+                                            <td style={{ padding: "0.45rem 0.75rem", fontWeight: 600, color: "#374151" }}>{s.name}</td>
+                                            <td style={{ padding: "0.45rem 0.75rem" }}>
+                                              <span style={{ background: rl.bg, color: rl.color, borderRadius: 4, padding: "0.15rem 0.5rem", fontSize: "0.68rem", fontWeight: 800, whiteSpace: "nowrap" }}>{rl.label}</span>
+                                            </td>
+                                            <td style={{ padding: "0.45rem 0.75rem" }}>
+                                              <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", flexWrap: "wrap" }}>
+                                                {s.history.map((h, hi) => (
+                                                  <span key={hi} style={{ background: h.score >= 70 ? "#dcfce7" : "#fee2e2", color: h.score >= 70 ? "#16a34a" : "#dc2626", borderRadius: 3, padding: "0.15rem 0.4rem", fontSize: "0.72rem", fontWeight: 700 }} title={h.assessment}>{h.score}%</span>
+                                                ))}
+                                                {s.history.length > 0 && <span style={{ color: "#9ca3af", fontSize: "0.65rem" }}>→</span>}
+                                                <span style={{ background: s.proficient ? "#dcfce7" : "#fee2e2", color: s.proficient ? "#16a34a" : "#dc2626", borderRadius: 3, padding: "0.15rem 0.4rem", fontSize: "0.72rem", fontWeight: 800, outline: "2px solid currentColor", outlineOffset: 1 }}>{s.pct}%</span>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
                                 </div>
                               );
                             })}
                           </div>
                         );
                       })()}
+
+                      {/* ── PDF EXPORT ── */}
+                      <div style={{ marginTop: "2rem", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "1rem 1.25rem" }}>
+                        <div style={{ fontWeight: 700, color: "#15803d", fontSize: "0.9rem", marginBottom: "0.35rem" }}>🖨️ Save Report as PDF</div>
+                        <p style={{ fontSize: "0.78rem", color: "#4b5563", margin: "0 0 0.75rem" }}>
+                          Downloads a PDF of the full Data and Report tabs so your team can save it to your shared drive for future reference.
+                        </p>
+                        <button
+                          onClick={() => {
+                            const prevTab = activeTab;
+                            // Render both data and analysis by switching to analysis (report is primary)
+                            setActiveTab("analysis");
+                            document.body.classList.add("printing");
+                            setTimeout(() => {
+                              window.print();
+                              setTimeout(() => {
+                                document.body.classList.remove("printing");
+                                setActiveTab(prevTab);
+                              }, 500);
+                            }, 150);
+                          }}
+                          style={{ background: "#16a34a", color: "white", border: "none", borderRadius: 8, padding: "0.5rem 1.2rem", fontSize: "0.85rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          🖨️ Print / Save as PDF
+                        </button>
+                        <p style={{ fontSize: "0.72rem", color: "#6b7280", margin: "0.6rem 0 0" }}>
+                          In the print dialog, choose <strong>Save as PDF</strong> as the destination. Set layout to <strong>Landscape</strong> for best results.
+                        </p>
+                      </div>
 
                       {/* ── ANALYTICS CSV EXPORT ── */}
                       {growthData && (
